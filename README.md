@@ -4,22 +4,29 @@ Windows 11 Pro deployment toolkit for Microsoft 365 Business Premium environment
 
 It does three things:
 
-- Prepares a Windows 11 install USB or ISO — forces Pro edition and injects Intel VMD storage drivers where the hardware needs it
+- Prepares a Windows 11 install USB or ISO — forces Pro edition and injects Intel drivers where the hardware needs them
 - Collects the device hardware hash and saves it locally
 - Uploads the hash directly to Intune via Microsoft Graph — no CSV, no manual import
 
 ---
 
-## What is the VMD fix and do you need it?
+## Driver injection — what gets injected and when
 
-Certain Intel laptops and desktops (11th to 14th gen) use Intel VMD to manage NVMe storage. The standard Windows installer doesn't include the VMD driver — on affected machines, setup either can't see the disk at all, or Windows installs fine but BSODs on first boot with `INACCESSIBLE_BOOT_DEVICE`.
+The script detects the CPU and injects the appropriate driver sets automatically:
 
-The script reads the CPU, works out whether the fix is needed, and sorts it automatically. No manual steps, no driver prompts during setup.
+| CPU | What gets injected |
+|---|---|
+| Intel Core Ultra Series 2 (Arrow Lake) | VMD, Wi-Fi/BT, Chipset, Touchpad |
+| Intel 11th–14th gen / Core Ultra Series 1 | VMD only |
+| Intel 15th gen / Core Ultra Series 3+, AMD, Qualcomm | Nothing — not required |
 
-**Affected:** Intel 11th gen (Tiger Lake), 12th (Alder Lake), 13th (Raptor Lake), 14th (Arrow Lake), Core Ultra Series 1–2
-**Not affected:** Intel 15th gen / Core Ultra Series 3+, AMD, Qualcomm
+**VMD** — Intel VMD manages NVMe storage on affected platforms. Without the driver, Windows setup either can't see the disk or BSODs on first boot with `INACCESSIBLE_BOOT_DEVICE`.
 
-If you're not on an affected platform the script runs as normal — the VMD steps are just skipped.
+**Wi-Fi/BT** — Covers the Intel BE201 (Wi-Fi 7) and associated Bluetooth adapter on Arrow Lake machines where inbox Windows support may be absent at setup time.
+
+**Chipset and Touchpad** — Arrow Lake platform drivers (Intel chipset INF and Asus touchpad stack) required for full hardware functionality on first boot.
+
+All driver sets are injected into both `boot.wim` (so setup can see the hardware) and all indexes in `install.wim` (so the installed OS boots and operates correctly).
 
 ---
 
@@ -27,13 +34,13 @@ If you're not on an affected platform the script runs as normal — the VMD step
 
 Auto-detection works by querying the hardware on the machine running the script. If you are prepping a USB or patching an ISO on a separate PC — which is common, especially for `-PatchISO` — the target machine's hardware won't be visible.
 
-In that case, use `-ForceWiFi` to inject the Wi-Fi/BT drivers unconditionally, regardless of what's detected on the prep machine.
-
-VMD detection also uses the CPU of the machine running the script. If you are prepping on a different machine, use `-ForceVMD` to inject the VMD driver unconditionally. For a full cross-machine prep — covering both VMD storage and Wi-Fi/BT — combine the flags:
+In that case, use `-ForceDrivers` to inject all driver sets unconditionally, regardless of what's detected on the prep machine:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceVMD -ForceWiFi
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceDrivers
 ```
+
+Same flag applies to `-PatchISO -ForceDrivers`.
 
 ---
 
@@ -47,7 +54,7 @@ Open PowerShell as Administrator (right-click → Run as administrator) and copy
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash
 ```
 
-**Prep a Windows 11 USB** — auto-detects the USB, handles Pro edition and VMD driver injection:
+**Prep a Windows 11 USB** — auto-detects the USB, handles Pro edition and driver injection:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
@@ -81,9 +88,9 @@ There are two ways to get a prepped Windows 11 USB. Pick whichever suits your si
 
 ### Option A — Prep an existing USB (-PrepUSB)
 
-For one-off builds or when you already have a USB to hand. Create the USB with Rufus first, then run `-PrepUSB` to inject Pro edition config and VMD drivers.
+For one-off builds or when you already have a USB to hand. Create the USB with Rufus first, then run `-PrepUSB` to inject Pro edition config and drivers.
 
-> **Use Rufus, not the Microsoft Media Creation Tool.** MCT creates USBs in ESD format — the VMD driver can't be injected into `install.wim` on an ESD USB. Boot disk detection will still be fixed, but the installed OS may BSOD on first boot on VMD-affected machines. Rufus creates WIM-format USBs which work properly.
+> **Use Rufus, not the Microsoft Media Creation Tool.** MCT creates USBs in ESD format — drivers can't be injected into `install.wim` on an ESD USB. Boot disk detection will still be fixed, but the installed OS may BSOD on first boot on VMD-affected machines. Rufus creates WIM-format USBs which work properly.
 
 **Creating the USB with [Rufus](https://rufus.ie):**
 
@@ -100,26 +107,14 @@ Once done, plug the USB into any PC with internet access and run `-PrepUSB`. The
 **What -PrepUSB does:**
 
 1. Injects `ei.cfg` → forces Pro edition at setup, no edition selection screen
-2. Detects the CPU → determines whether VMD injection is needed
-3. If needed, downloads the VMD driver from this repo and injects it into `boot.wim` (so setup can see the disk) and all indexes in `install.wim` (so the installed OS can boot)
+2. Detects the CPU → determines which driver sets are needed
+3. Downloads the required drivers from this repo and injects them into `boot.wim` (so setup can see the hardware) and all indexes in `install.wim` (so the installed OS boots and operates correctly)
 
-If you are prepping the USB on a different machine to the one being built, the CPU won't match the target and VMD may be skipped. Use `-ForceVMD` to inject regardless:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceVMD
-```
-
-### 4. Injects Wi-Fi and Bluetooth drivers (if Intel BE201 detected)
-
-If the machine running the script has an Intel BE201 (Wi-Fi 7) adapter, the script also injects the WLAN and Bluetooth drivers into both boot.wim and install.wim. This covers machines where Windows setup or first boot may not have inbox support for the BE201. Detection is automatic — if the adapter isn't present the step is skipped silently.
-
-If you are prepping the USB on a different machine to the one being built, auto-detection won't work — the adapter won't be present. Use `-ForceWiFi` to inject the drivers regardless:
+If you are prepping the USB on a different machine to the one being built, the CPU won't match the target and drivers may be skipped. Use `-ForceDrivers` to inject all driver sets regardless:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceWiFi
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceDrivers
 ```
-
-Same applies to `-PatchISO -ForceWiFi`.
 
 ### Option B — Pre-stage a golden ISO (-PatchISO)
 
@@ -135,7 +130,7 @@ The ISO can also be hosted centrally (file share, Azure Blob, etc.) so the team 
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO
 ```
 
-A file picker opens for the source ISO, then a folder picker for the output location. The script does the rest — Pro edition config, VMD injection into both WIM files, and repacks to a new `.iso` file. Burn the output with Rufus.
+A file picker opens for the source ISO, then a folder picker for the output location. The script does the rest — Pro edition config, driver injection into both WIM files, and repacks to a new `.iso` file. Burn the output with Rufus.
 
 > This feature is untested end-to-end. If you run into problems, [raise an issue](https://github.com/FoobyGitHub/autopilot-prep-W11/issues).
 
@@ -202,7 +197,7 @@ Requires an Entra ID App Registration with `DeviceManagementServiceConfig.ReadWr
 | Licence | Microsoft 365 Business Premium (includes Windows 11 Pro) |
 | PowerShell | 5.1 or later (inbox on all supported Windows versions) |
 | Elevation | Must run as Administrator |
-| Internet | Needed for VMD driver fetch from GitHub, hash upload, and Autopilot at OOBE |
+| Internet | Needed for driver fetch from GitHub, hash upload, and Autopilot at OOBE |
 | ADK | Not needed for `-PrepUSB` — only for `-PatchISO`, and installed automatically if missing |
 
 ---

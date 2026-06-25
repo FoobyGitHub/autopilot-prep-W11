@@ -1,0 +1,108 @@
+;============================================================================ 
+; Installation file (.inf) for Windows 8.
+;
+; Copyright (c) ASUS Tek
+;============================================================================
+
+[Version]
+Signature   = "$Windows NT$"
+Class		= HIDClass
+ClassGuid	= {745a17a0-74d3-11d0-b6fe-00a0c90f57da};HIDClassGuid
+;Class		= Mouse
+;ClassGuid	= {4D36E96F-E325-11CE-BFC1-08002BE10318};MouseClassGuid
+Provider    = %VenderName%
+DriverVer = 09/30/2025,23.0.0.6
+CatalogFile = AsusConsumerDevFilter.cat
+Pnplockdown = 1
+
+
+[DestinationDirs]
+DefaultDestDir					= 12    ; DIRID_DRIVERS
+AsusFilter_Inst.CopyFiles.NT	= 13    ; Driver directory
+
+ 
+;----------------------------------------------------------------------------
+; Common File Copy and Registry Operations
+;----------------------------------------------------------------------------
+[AsusFilter_Inst.CopyFiles.NT]
+AsusConsumerDevFilter.sys
+
+
+;----------------------------------------------------------------------------
+; Manufacturer Section
+;----------------------------------------------------------------------------
+[Manufacturer]
+%VenderName%=ASUSMfg, NTamd64.10.0...16299
+
+
+[ASUSMfg.NTx86.10.0...16299]
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\AsusVTouchDev&Col03				;Virtual Consumer
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\ASUH2024&Col03					;SW component Consumer
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\VID_0B05&PID_1879&REV_0008&MI_01&Col01	;WHQL (Test)
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\VID_0B05&PID_1879&REV_0200&Col04	;WHQL Test(HY-TINY)
+
+[ASUSMfg.NTamd64.10.0...16299]
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\AsusVTouchDev&Col03				;Virtual Consumer
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\ASUH2024&Col03					;SW component Consumer
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\VID_0B05&PID_1879&REV_0008&MI_01&Col01	;WHQL (Test)
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\VID_0B05&PID_1879&REV_0200&Col04	;WHQL Test(HY-TINY)
+
+[ASUSMfg.NTARM64.10.0...16299]
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\ASUH2024&Col03					;SW component Consumer
+%ASUS_INPUT_DEVICE.DeviceDesc%=AsusFilter_Inst, HID\vhidmini&Col03					;SW component Consumer ARM mini
+
+[AsusFilter_Inst.NT]
+FeatureScore=00
+CopyFiles= AsusFilter_Inst.CopyFiles.NT
+
+;-------------- Service installation
+[AsusFilter_Inst.NT.Services]
+AddService = AsusConsumerDevice,%SPSVCINST_ASSOCSERVICE%, AsusFilter_Service_Inst
+
+
+;-------------- PTPFilter driver install sections
+[AsusFilter_Service_Inst]
+DisplayName    = %AsusFilter.SvcDesc%
+ServiceType    = 1  ;SERVICE_KERNEL_DRIVER
+StartType      = 3  ;SERVICE_DEMAND_START
+ErrorControl   = 1  ;SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\AsusConsumerDevFilter.sys
+LoadOrderGroup = Extended Base
+AddReg	       = AsusFilterDrv_Service_ALGO_AddReg
+DelReg	       = AsusFilterDrv_Service_ALGO_DelReg
+
+
+[AsusFilterDrv_Service_ALGO_AddReg]
+HKR,Parameters\SupportList,"PTP_0",0x00010000,"AsusVTouchDev&Col03"
+HKR,Parameters\SupportList,"PTP_1",0x00010000,"ASUH2024&Col03"
+HKR,Parameters\SupportList,"PTP_2",0x00010000,"VID_0B05&PID_1879&MI_01&Col01"
+HKR,Parameters\SupportList,"PTP_3",0x00010000,"VID_0B05&PID_1879&Col04"
+HKR,Parameters\SupportList,"PTP_4",0x00010000,"vhidmini&Col03"
+
+[AsusFilterDrv_Service_ALGO_DelReg]
+HKR,Parameters
+
+
+; ---------------------------------------------------------
+; Source Media Section
+; ---------------------------------------------------------
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+AsusConsumerDevFilter.sys = 1
+
+
+; Strings Section
+; ---------------------------------------------------------
+[Strings]
+SPSVCINST_ASSOCSERVICE			= 0x00000002
+VenderName						= "ASUSTek COMPUTER INC."
+AsusFilter.SvcDesc				= "ASUS Consumer Device Service"
+DiskName						= "ASUSWare Driver Disk"
+ASUS_INPUT_DEVICE.DeviceDesc	= "ASUS Consumer Device"
+
+
+; Driver Information Entries
+DriverProduct   = "ASUS Consumer Device Driver"
+

@@ -11,8 +11,7 @@ param(
     [switch]$PrepUSB,
     [switch]$CollectHash,
     [switch]$PatchISO,
-    [switch]$ForceWiFi,
-    [switch]$ForceVMD,
+    [switch]$ForceDrivers,
     [string]$DriveLetter,
     [string]$OutputPath,
     [string]$TenantId,
@@ -44,12 +43,11 @@ if (-not $PrepUSB -and -not $CollectHash -and -not $PatchISO) {
     Write-Host "No action specified. Available flags:" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  -CollectHash                Collect hash and upload to Intune (device code sign-in — browser prompted)" -ForegroundColor White
-    Write-Host "  -PrepUSB                    Inject ei.cfg + VMD driver into a Windows 11 USB" -ForegroundColor White
-    Write-Host "  -PatchISO                   Pre-stage a Windows 11 ISO with VMD drivers and Pro edition config — outputs a patched ISO ready to burn with Rufus" -ForegroundColor White
+    Write-Host "  -PrepUSB                    Inject ei.cfg and drivers into a Windows 11 USB" -ForegroundColor White
+    Write-Host "  -PatchISO                   Pre-stage a Windows 11 ISO with drivers and Pro edition config — outputs a patched ISO ready to burn with Rufus" -ForegroundColor White
     Write-Host "  -DriveLetter X              Force a specific drive letter for -PrepUSB  (e.g. -DriveLetter E)" -ForegroundColor White
     Write-Host "  -OutputPath path            Override the hash CSV save location" -ForegroundColor White
-    Write-Host "  -ForceWiFi                  Force Wi-Fi/BT driver injection even if Intel BE201 is not detected on this machine. Use when prepping a USB or ISO on a different PC to the one being built." -ForegroundColor White
-    Write-Host "  -ForceVMD                   Force VMD driver injection even if the CPU on this machine does not require it. Use when prepping a USB or ISO on a different PC to the one being built." -ForegroundColor White
+    Write-Host "  -ForceDrivers               Force full driver injection (VMD, Wi-Fi/BT, Chipset, Touchpad) regardless of what is detected on this machine. Use when prepping a USB or ISO on a different PC to the one being built." -ForegroundColor White
     Write-Host ""
     Write-Host "  Option 1 — certificate authentication (unattended, no browser prompt):" -ForegroundColor DarkGray
     Write-Host "  -TenantId <id>              Azure AD tenant ID" -ForegroundColor White
@@ -64,7 +62,7 @@ if (-not $PrepUSB -and -not $CollectHash -and -not $PatchISO) {
     Write-Host "  Collect hash + upload silently (certificate auth — Option 1):" -ForegroundColor DarkGray
     Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash -TenantId <id> -AppClientId <id> -AppCertThumbprint <thumbprint>" -ForegroundColor White
     Write-Host ""
-    Write-Host "  Prep a Windows 11 USB for Pro install (auto-detects CPU, injects VMD driver if needed):" -ForegroundColor DarkGray
+    Write-Host "  Prep a Windows 11 USB for Pro install (auto-detects CPU, injects drivers if needed):" -ForegroundColor DarkGray
     Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB" -ForegroundColor White
     Write-Host ""
     Write-Host "  Prep USB on drive E specifically:" -ForegroundColor DarkGray
@@ -110,75 +108,96 @@ function Find-Windows11USB {
     return $null
 }
 
-# ── VMD detection helpers ──────────────────────────────────────────────────────
+# ── Driver detection ───────────────────────────────────────────────────────────
 
-function Get-CPUVMDStatus {
+function Get-DriversRequired {
     param(
-        [string]$CpuName,
-        [bool]$Force = $false
+        [bool]$Force = $false,
+        [string]$Tag = '[Driver]'
     )
 
     if ($Force) {
-        return @{ NeedsVMD = $true; Reason = "-ForceVMD specified" }
+        Write-Host "$Tag -ForceDrivers specified — injecting all driver sets regardless of detected hardware." -ForegroundColor Yellow
+        return 'all'
     }
 
-    # AMD / Qualcomm / ARM — no VMD controller present
-    if ($CpuName -match '(AMD|Ryzen|EPYC|Qualcomm|Snapdragon)') {
-        return @{ NeedsVMD = $false; Reason = "AMD/Qualcomm CPU detected — VMD not applicable, skipping" }
+    try {
+        $cpuName = (Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name -First 1).Trim()
+        Write-Host "$Tag CPU: $cpuName" -ForegroundColor Cyan
+    } catch {
+        Write-Host "$Tag WARNING: Could not read CPU info — $_" -ForegroundColor Yellow
+        return $false
     }
 
-    if ($CpuName -notmatch 'Intel') {
-        return @{ NeedsVMD = $false; Reason = "Non-Intel CPU detected — skipping VMD check" }
+    # AMD / Qualcomm / ARM — no VMD or platform drivers applicable
+    if ($cpuName -match '(AMD|Ryzen|EPYC|Qualcomm|Snapdragon)') {
+        Write-Host "$Tag AMD/Qualcomm CPU detected — driver injection not required." -ForegroundColor DarkGray
+        return $false
     }
 
-    # Intel Core Ultra series (Meteor Lake / Lunar Lake / Arrow Lake)
-    # Naming pattern: "Intel(R) Core(TM) Ultra 5 125H"
-    #   100-series = Series 1 (Meteor Lake)   → VMD required
-    #   200-series = Series 2 (Lunar Lake / Arrow Lake) → VMD required
-    #   300-series = Series 3 (per spec: no VMD)
-    if ($CpuName -match 'Core\s*\(TM\)\s*Ultra\s+\d+\s+(\d{3})') {
+    if ($cpuName -notmatch 'Intel') {
+        Write-Host "$Tag Non-Intel CPU detected — driver injection not required." -ForegroundColor DarkGray
+        return $false
+    }
+
+    # Intel Core Ultra series — model number suffix determines series
+    # 100-series = Series 1 (Meteor Lake)  → VMD only
+    # 200-series = Series 2 (Arrow Lake)   → all driver sets
+    # 300-series = Series 3+               → no injection needed
+    if ($cpuName -match 'Core\s*\(TM\)\s*Ultra\s+\d+\s+(\d{3})') {
         $series = [math]::Floor([int]$Matches[1] / 100)
         if ($series -ge 3) {
-            return @{ NeedsVMD = $false; Reason = "Intel Core Ultra Series $series detected — VMD not required" }
+            Write-Host "$Tag Intel Core Ultra Series $series detected — driver injection not required." -ForegroundColor DarkGray
+            return $false
         }
-        return @{ NeedsVMD = $true; Reason = "Intel Core Ultra Series $series detected — VMD driver required" }
+        if ($series -eq 2) {
+            Write-Host "$Tag Intel Core Ultra Series 2 (Arrow Lake) detected — full driver set required." -ForegroundColor Cyan
+            return 'all'
+        }
+        Write-Host "$Tag Intel Core Ultra Series $series (Meteor Lake) detected — VMD driver required." -ForegroundColor Cyan
+        return 'vmd-only'
     }
 
     # Intel Core i-series (traditional generations)
-    # Model number format: i7-1165G7 → captures "1165" (4 digits) → gen 11
-    #                      i9-13900K → captures "13900" (5 digits) → gen 13
-    if ($CpuName -match 'Core\s*\(TM\)\s+i\d+-(\d{4,5})') {
+    # Model number format: i7-1165G7 → 4 digits → gen 11
+    #                      i9-13900K → 5 digits → gen 13
+    if ($cpuName -match 'Core\s*\(TM\)\s+i\d+-(\d{4,5})') {
         $modelStr = $Matches[1]
         $gen = if ($modelStr.Length -eq 4) {
-            [math]::Floor([int]$modelStr / 100)    # 1165 → 11
+            [math]::Floor([int]$modelStr / 100)
         } else {
-            [math]::Floor([int]$modelStr / 1000)   # 13900 → 13
+            [math]::Floor([int]$modelStr / 1000)
         }
 
         if ($gen -ge 11 -and $gen -le 14) {
-            return @{ NeedsVMD = $true; Reason = "Intel ${gen}th gen detected — VMD driver required" }
+            Write-Host "$Tag Intel ${gen}th gen detected — VMD driver required." -ForegroundColor Cyan
+            return 'vmd-only'
         }
-        return @{ NeedsVMD = $false; Reason = "Intel ${gen}th gen detected — VMD not required" }
+        Write-Host "$Tag Intel ${gen}th gen detected — driver injection not required." -ForegroundColor DarkGray
+        return $false
     }
 
-    # Unrecognised Intel CPU string — skip with a warning
-    return @{ NeedsVMD = $false; Reason = "Intel CPU generation unrecognised ('$CpuName') — skipping VMD injection" }
+    Write-Host "$Tag Intel CPU generation unrecognised ('$cpuName') — skipping driver injection." -ForegroundColor Yellow
+    return $false
 }
 
-function Invoke-WimVmdInjection {
+# ── Shared DISM injection helper ───────────────────────────────────────────────
+
+function Invoke-WimDriverSet {
     param(
         [string]$Root,
         [string]$DriverDir,
-        [string]$Tag
+        [string]$Tag,
+        [string]$Label
     )
 
     # ── boot.wim injection (index 2) ──────────────────────────────────────────
     $bootWim  = "${Root}sources\boot.wim"
     $mountDir = Join-Path $env:TEMP "WimMount_$(Get-Random)"
     New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
-    $dismOk = $false
+    $bootOk = $false
 
-    Write-Host "$Tag Injecting VMD driver into boot.wim (index 2) using dism.exe..." -ForegroundColor Cyan
+    Write-Host "$Tag Injecting $Label driver into boot.wim (index 2) using dism.exe..." -ForegroundColor Cyan
 
     try {
         & "$env:SystemRoot\System32\attrib.exe" -R "$bootWim" 2>&1 | Out-Null
@@ -193,20 +212,20 @@ function Invoke-WimVmdInjection {
         $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Commit 2>&1
         if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
 
-        $dismOk = $true
+        $bootOk = $true
 
     } catch {
-        Write-Host "$Tag ERROR: DISM injection into boot.wim failed — $_" -ForegroundColor Red
+        Write-Host "$Tag ERROR: DISM injection into boot.wim failed for $Label — $_" -ForegroundColor Red
     } finally {
-        if (-not $dismOk) {
+        if (-not $bootOk) {
             & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
         }
         Remove-Item -Path $mountDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    if (-not $dismOk) { return $false }
+    if (-not $bootOk) { return $false }
 
-    Write-Host "$Tag VMD driver injected into boot.wim — disk will be detected automatically during Windows setup." -ForegroundColor Green
+    Write-Host "$Tag $Label driver injected into boot.wim." -ForegroundColor Green
 
     # ── install.wim injection (all indexes) ───────────────────────────────────
     $installWim = "${Root}sources\install.wim"
@@ -214,14 +233,14 @@ function Invoke-WimVmdInjection {
 
     if (-not (Test-Path $installWim)) {
         if (Test-Path $installEsd) {
-            Write-Host "$Tag WARNING: install.esd detected (MCT-created USB) — install.wim injection skipped. Boot disk detection is fixed but OS may BSOD on first boot. Recreate the USB using Rufus (see README) for full VMD support." -ForegroundColor Yellow
+            Write-Host "$Tag WARNING: install.esd detected (MCT-created USB) — install.wim injection skipped. Boot disk detection is fixed but OS may BSOD on first boot. Recreate the USB using Rufus (see README) for full driver support." -ForegroundColor Yellow
         } else {
             Write-Host "$Tag WARNING: install.wim not found — skipping install.wim injection." -ForegroundColor Yellow
         }
         return $true
     }
 
-    Write-Host "$Tag Enumerating install.wim indexes..." -ForegroundColor Cyan
+    Write-Host "$Tag Enumerating install.wim indexes for $Label..." -ForegroundColor Cyan
     $wimInfoOut = & "$env:SystemRoot\System32\dism.exe" /Get-WimInfo /WimFile:"$installWim" 2>&1
     $indexCount = ($wimInfoOut | Select-String -Pattern '^\s*Index\s*:\s*\d+').Count
 
@@ -230,7 +249,7 @@ function Invoke-WimVmdInjection {
         return $false
     }
 
-    Write-Host "$Tag Found $indexCount index(es) in install.wim — injecting VMD driver into each..." -ForegroundColor Cyan
+    Write-Host "$Tag Found $indexCount index(es) in install.wim — injecting $Label driver into each..." -ForegroundColor Cyan
 
     & "$env:SystemRoot\System32\attrib.exe" -R "$installWim" 2>&1 | Out-Null
     Write-Host "$Tag Read-only attribute cleared on install.wim." -ForegroundColor DarkGray
@@ -257,7 +276,7 @@ function Invoke-WimVmdInjection {
             $idxOk = $true
 
         } catch {
-            Write-Host "$Tag ERROR: DISM injection into install.wim index $idx failed — $_" -ForegroundColor Red
+            Write-Host "$Tag ERROR: DISM injection into install.wim index $idx failed for $Label — $_" -ForegroundColor Red
             $installOk = $false
         } finally {
             if (-not $idxOk) {
@@ -270,255 +289,87 @@ function Invoke-WimVmdInjection {
     }
 
     if (-not $installOk) {
-        Write-Host "$Tag ERROR: VMD injection into install.wim failed — see above." -ForegroundColor Red
+        Write-Host "$Tag ERROR: $Label injection into install.wim failed — see above." -ForegroundColor Red
         return $false
     }
 
-    Write-Host "$Tag VMD driver injected into install.wim ($indexCount indexes) — installed OS will boot correctly." -ForegroundColor Green
+    Write-Host "$Tag $Label driver injected into install.wim ($indexCount indexes)." -ForegroundColor Green
     return $true
 }
 
-# ── Wi-Fi / BT detection and injection ────────────────────────────────────────
+# ── Driver download and injection ──────────────────────────────────────────────
 
-function Get-WiFiDriverRequired {
-    param([bool]$Force = $false)
-    if ($Force) {
-        Write-Host "[PrepUSB] -ForceWiFi specified — injecting Wi-Fi/BT drivers regardless of detected hardware." -ForegroundColor Yellow
-        return $true
-    }
-    Write-Host "[PrepUSB] Checking for Intel BE201 Wi-Fi 7 adapter..." -ForegroundColor Cyan
-    try {
-        $found = Get-WmiObject -Class Win32_PnPEntity |
-                 Where-Object { $_.PNPDeviceID -match 'DEV_272B' } |
-                 Select-Object -First 1
-        if ($found) {
-            Write-Host "[PrepUSB] Intel BE201 detected — Wi-Fi/BT driver injection required." -ForegroundColor Yellow
-            return $true
-        }
-        Write-Host "[PrepUSB] Intel BE201 not detected — skipping Wi-Fi/BT driver injection." -ForegroundColor DarkGray
-        return $false
-    } catch {
-        Write-Host "[PrepUSB] WARNING: Could not query PnP devices for BE201 detection — $_" -ForegroundColor Yellow
-        return $false
-    }
-}
-
-function Invoke-WiFiDriverInjection {
+function Invoke-DriverInjection {
     param(
         [string]$Root,
-        [string]$Tag
+        [string]$Tag,
+        [string]$Mode  # 'vmd-only' or 'all'
     )
 
-    $stagingDir = "$env:TEMP\WiFiDriverStaging"
-    if (Test-Path $stagingDir) {
-        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
-
-    # Enumerate files from the repo tree then download each one
-    $apiUrl    = 'https://api.github.com/repos/FoobyGitHub/autopilot-prep-W11/git/trees/main?recursive=1'
-    $wifiFiles = $null
-    try {
-        $tree      = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -ErrorAction Stop
-        $wifiFiles = $tree.tree | Where-Object { $_.type -eq 'blob' -and $_.path -like 'drivers/WiFi/*' }
-    } catch {
-        Write-Host "$Tag ERROR: Could not fetch Wi-Fi driver file list from GitHub — $_" -ForegroundColor Red
-        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
-    if (-not $wifiFiles) {
-        Write-Host "$Tag ERROR: No Wi-Fi driver files found in repo at drivers/WiFi/." -ForegroundColor Red
-        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
+    $apiUrl   = 'https://api.github.com/repos/FoobyGitHub/autopilot-prep-W11/git/trees/main?recursive=1'
     $repoBase = 'https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main'
-    Write-Host "$Tag Downloading Wi-Fi/BT driver files from repo..." -ForegroundColor Cyan
 
-    try {
-        foreach ($file in $wifiFiles) {
-            $relPath = $file.path -replace '^drivers/WiFi/', ''
-            $dest    = Join-Path $stagingDir ($relPath -replace '/', '\')
-            $destDir = Split-Path $dest -Parent
-            if (-not (Test-Path $destDir)) {
-                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-            }
-            Invoke-WebRequest -Uri "$repoBase/$($file.path)" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-            Write-Host "$Tag   $relPath" -ForegroundColor DarkGray
-        }
-        Write-Host "$Tag Driver files ready." -ForegroundColor Cyan
-    } catch {
-        Write-Host "$Tag ERROR: Could not download Wi-Fi/BT driver files — $_" -ForegroundColor Red
-        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
-    # ── boot.wim injection (index 2) ──────────────────────────────────────────
-    $bootWim  = "${Root}sources\boot.wim"
-    $mountDir = Join-Path $env:TEMP "WimMount_$(Get-Random)"
-    New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
-    $bootOk   = $false
-
-    Write-Host "$Tag Injecting Wi-Fi/BT driver into boot.wim (index 2) using dism.exe..." -ForegroundColor Cyan
-
-    try {
-        & "$env:SystemRoot\System32\attrib.exe" -R "$bootWim" 2>&1 | Out-Null
-        Write-Host "$Tag Read-only attribute cleared on boot.wim." -ForegroundColor DarkGray
-
-        $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$bootWim" /Index:2 /MountDir:"$mountDir" 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-        $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$mountDir" /Add-Driver /Driver:"$stagingDir" /Recurse 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-        $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Commit 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-        $bootOk = $true
-
-    } catch {
-        Write-Host "$Tag ERROR: DISM injection into boot.wim failed — $_" -ForegroundColor Red
-    } finally {
-        if (-not $bootOk) {
-            & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
-        }
-        Remove-Item -Path $mountDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-
-    if (-not $bootOk) {
-        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
-    # ── install.wim injection (all indexes) ───────────────────────────────────
-    $installWim = "${Root}sources\install.wim"
-    $installEsd = "${Root}sources\install.esd"
-
-    if (-not (Test-Path $installWim)) {
-        if (Test-Path $installEsd) {
-            Write-Host "$Tag WARNING: install.esd detected (MCT-created USB) — install.wim injection skipped. Boot disk detection is fixed but OS may BSOD on first boot. Recreate the USB using Rufus (see README) for full VMD support." -ForegroundColor Yellow
-        } else {
-            Write-Host "$Tag WARNING: install.wim not found — skipping install.wim injection." -ForegroundColor Yellow
-        }
-        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-        return $true
-    }
-
-    Write-Host "$Tag Enumerating install.wim indexes for Wi-Fi/BT injection..." -ForegroundColor Cyan
-    $wimInfoOut = & "$env:SystemRoot\System32\dism.exe" /Get-WimInfo /WimFile:"$installWim" 2>&1
-    $indexCount = ($wimInfoOut | Select-String -Pattern '^\s*Index\s*:\s*\d+').Count
-
-    if ($indexCount -eq 0) {
-        Write-Host "$Tag ERROR: Could not determine index count from install.wim." -ForegroundColor Red
-        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
-    Write-Host "$Tag Found $indexCount index(es) in install.wim — injecting Wi-Fi/BT driver into each..." -ForegroundColor Cyan
-
-    & "$env:SystemRoot\System32\attrib.exe" -R "$installWim" 2>&1 | Out-Null
-    Write-Host "$Tag Read-only attribute cleared on install.wim." -ForegroundColor DarkGray
-
-    $installOk = $true
-
-    for ($idx = 1; $idx -le $indexCount; $idx++) {
-        $installMountDir = Join-Path $env:TEMP "InstallWimMount_$(Get-Random)"
-        New-Item -ItemType Directory -Path $installMountDir -Force | Out-Null
-        $idxOk = $false
-
-        Write-Host "$Tag Processing install.wim index $idx of $indexCount..." -ForegroundColor Cyan
-
-        try {
-            $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$installWim" /Index:$idx /MountDir:"$installMountDir" 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$installMountDir" /Add-Driver /Driver:"$stagingDir" /Recurse 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Commit 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $idxOk = $true
-
-        } catch {
-            Write-Host "$Tag ERROR: DISM injection into install.wim index $idx failed — $_" -ForegroundColor Red
-            $installOk = $false
-        } finally {
-            if (-not $idxOk) {
-                & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Discard 2>&1 | Out-Null
-            }
-            Remove-Item -Path $installMountDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-
-        if (-not $idxOk) { break }
-    }
-
-    Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-
-    if (-not $installOk) {
-        Write-Host "$Tag ERROR: Wi-Fi/BT injection into install.wim failed — see above." -ForegroundColor Red
-        return $false
-    }
-
-    Write-Host "$Tag Wi-Fi/BT driver injected into boot.wim and install.wim." -ForegroundColor Green
-    return $true
-}
-
-function Invoke-VMDDriverInjection {
-    param(
-        [string]$UsbRoot
-    )
-
-    if ($ForceVMD.IsPresent) {
-        Write-Host "[PrepUSB] -ForceVMD specified — injecting VMD drivers regardless of detected CPU." -ForegroundColor Yellow
-        $vmdStatus = Get-CPUVMDStatus -CpuName '' -Force $true
+    $driverSets = if ($Mode -eq 'vmd-only') {
+        @('VMD')
     } else {
-        Write-Host "[PrepUSB] Detecting CPU generation for VMD requirement..." -ForegroundColor Cyan
-        try {
-            $cpuName = (Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name -First 1).Trim()
-            Write-Host "[PrepUSB] CPU: $cpuName" -ForegroundColor Cyan
-        } catch {
-            Write-Host "[PrepUSB] ERROR: Could not read CPU info — $_" -ForegroundColor Red
+        @('VMD', 'WiFi', 'Chipset', 'Touchpad')
+    }
+
+    Write-Host "$Tag Fetching driver file list from repo..." -ForegroundColor Cyan
+    $tree = $null
+    try {
+        $tree = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Write-Host "$Tag ERROR: Could not fetch driver file list from GitHub — $_" -ForegroundColor Red
+        return $false
+    }
+
+    foreach ($set in $driverSets) {
+        $stagingDir = Join-Path $env:TEMP "DriverStaging_${set}_$(Get-Random)"
+        if (Test-Path $stagingDir) {
+            Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+        $setFiles = $tree.tree | Where-Object { $_.type -eq 'blob' -and $_.path -like "drivers/$set/*" }
+
+        if (-not $setFiles) {
+            Write-Host "$Tag ERROR: No $set driver files found in repo at drivers/$set/." -ForegroundColor Red
+            Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
             return $false
         }
-        $vmdStatus = Get-CPUVMDStatus -CpuName $cpuName
-    }
 
-    if (-not $vmdStatus.NeedsVMD) {
-        Write-Host "[PrepUSB] CPU does not require VMD driver — skipping injection." -ForegroundColor DarkGray
-        return $true
-    }
+        Write-Host "$Tag Downloading $set driver files from repo..." -ForegroundColor Cyan
 
-    Write-Host "[PrepUSB] $($vmdStatus.Reason)" -ForegroundColor Cyan
-
-    $tempDir     = Join-Path $env:TEMP "AutopilotVMD_$(Get-Random)"
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-    $repoBase    = "https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/drivers/VMD"
-    $driverFiles = @('iaStorVD.cat','iaStorVD.inf','iaStorVD.sys','RstMwEventLogMsg.dll','RstMwService.exe')
-
-    try {
-        Write-Host "[PrepUSB] Downloading VMD driver files from repo..." -ForegroundColor Cyan
-        foreach ($file in $driverFiles) {
-            $dest = Join-Path $tempDir $file
-            Invoke-WebRequest -Uri "$repoBase/$file" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-            Write-Host "[PrepUSB]   $file" -ForegroundColor DarkGray
+        $downloadOk = $true
+        try {
+            foreach ($file in $setFiles) {
+                $relPath = $file.path -replace "^drivers/$set/", ''
+                $dest    = Join-Path $stagingDir ($relPath -replace '/', '\')
+                $destDir = Split-Path $dest -Parent
+                if (-not (Test-Path $destDir)) {
+                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                }
+                Invoke-WebRequest -Uri "$repoBase/$($file.path)" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                Write-Host "$Tag   $relPath" -ForegroundColor DarkGray
+            }
+            Write-Host "$Tag $set driver files ready." -ForegroundColor Cyan
+        } catch {
+            Write-Host "$Tag ERROR: Could not download $set driver files — $_" -ForegroundColor Red
+            $downloadOk = $false
         }
-        Write-Host "[PrepUSB] Driver files ready." -ForegroundColor Cyan
-    } catch {
-        Write-Host "[PrepUSB] ERROR: Could not download VMD driver files — $_" -ForegroundColor Red
-        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
+
+        if (-not $downloadOk) {
+            Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+
+        $result = Invoke-WimDriverSet -Root $Root -DriverDir $stagingDir -Tag $Tag -Label $set
+        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+
+        if (-not $result) { return $false }
     }
 
-    $wifiRequired = Get-WiFiDriverRequired -Force $ForceWiFi.IsPresent
-    $result = Invoke-WimVmdInjection -Root $UsbRoot -DriverDir $tempDir -Tag '[PrepUSB]'
-    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-    if (-not $result) { return $false }
-    if ($wifiRequired) {
-        $wifiResult = Invoke-WiFiDriverInjection -Root $UsbRoot -Tag '[PrepUSB]'
-        if (-not $wifiResult) { return $false }
-    }
     return $true
 }
 
@@ -567,9 +418,12 @@ function Invoke-PrepUSB {
         return $false
     }
 
-    # ── VMD driver detection and injection ─────────────────────────────────────
-    $vmdOk = Invoke-VMDDriverInjection -UsbRoot $root
-    if (-not $vmdOk) { return $false }
+    # ── Driver detection and injection ─────────────────────────────────────────
+    $driverMode = Get-DriversRequired -Force $ForceDrivers.IsPresent -Tag '[PrepUSB]'
+    if ($driverMode) {
+        $driverOk = Invoke-DriverInjection -Root $root -Tag '[PrepUSB]' -Mode $driverMode
+        if (-not $driverOk) { return $false }
+    }
 
     return $true
 }
@@ -1013,45 +867,11 @@ function Invoke-PatchISO {
     Set-Content -Path $eiCfgPath -Value $eiCfg -Encoding ASCII -Force
     Write-Host "[PatchISO] ei.cfg injected — USB will install Windows 11 Pro automatically." -ForegroundColor Green
 
-    # ── Download and inject VMD drivers ───────────────────────────────────────
-    $vmdTempDir  = Join-Path $env:TEMP "AutopilotVMD_$(Get-Random)"
-    New-Item -ItemType Directory -Path $vmdTempDir -Force | Out-Null
-    $driverOk    = $false
-    $repoBase    = "https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/drivers/VMD"
-    $driverFiles = @('iaStorVD.cat','iaStorVD.inf','iaStorVD.sys','RstMwEventLogMsg.dll','RstMwService.exe')
-
-    try {
-        Write-Host "[PatchISO] Downloading VMD driver files from repo..." -ForegroundColor Cyan
-        foreach ($file in $driverFiles) {
-            $dest = Join-Path $vmdTempDir $file
-            Invoke-WebRequest -Uri "$repoBase/$file" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-            Write-Host "[PatchISO]   $file" -ForegroundColor DarkGray
-        }
-        Write-Host "[PatchISO] Driver files ready." -ForegroundColor Cyan
-        $driverOk = $true
-    } catch {
-        Write-Host "[PatchISO] ERROR: Could not download VMD driver files — $_" -ForegroundColor Red
-    }
-
-    if (-not $driverOk) {
-        Remove-Item -Path $vmdTempDir  -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
-    $vmdOk = Invoke-WimVmdInjection -Root $stagingRoot -DriverDir $vmdTempDir -Tag '[PatchISO]'
-    Remove-Item -Path $vmdTempDir -Recurse -Force -ErrorAction SilentlyContinue
-
-    if (-not $vmdOk) {
-        Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
-    # ── Wi-Fi/BT driver injection (if Intel BE201 detected) ───────────────────
-    $wifiRequired = Get-WiFiDriverRequired -Force $ForceWiFi.IsPresent
-    if ($wifiRequired) {
-        $wifiOk = Invoke-WiFiDriverInjection -Root $stagingRoot -Tag '[PatchISO]'
-        if (-not $wifiOk) {
+    # ── Driver detection and injection ────────────────────────────────────────
+    $driverMode = Get-DriversRequired -Force $ForceDrivers.IsPresent -Tag '[PatchISO]'
+    if ($driverMode) {
+        $driverOk = Invoke-DriverInjection -Root $stagingRoot -Tag '[PatchISO]' -Mode $driverMode
+        if (-not $driverOk) {
             Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
             return $false
         }
