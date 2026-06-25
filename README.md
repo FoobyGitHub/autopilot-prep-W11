@@ -90,11 +90,11 @@ Open PowerShell as Administrator (right-click → Run as administrator) and copy
 
 ## Deployment workflows
 
-There are two ways to get a prepped Windows 11 USB. Pick whichever suits your situation.
+### Deploying directly on the target machine
 
-### Option A — Prep an existing USB (-PrepUSB)
+Run the script on the machine you are rebuilding. Detection reads the local CPU and injects only what that hardware needs — no flags required.
 
-For one-off builds or when you already have a USB to hand. Create the USB with Rufus first, then run `-PrepUSB` to inject Pro edition config and drivers.
+Create the USB with Rufus first (see below), then run `-PrepUSB` on the target machine. The script finds the USB automatically, injects `ei.cfg` and the appropriate drivers, then the machine is ready to reboot from it.
 
 > **Use Rufus, not the Microsoft Media Creation Tool.** MCT creates USBs in ESD format — drivers can't be injected into `install.wim` on an ESD USB. Boot disk detection will still be fixed, but the installed OS may BSOD on first boot on VMD-affected machines. Rufus creates WIM-format USBs which work properly.
 
@@ -108,37 +108,33 @@ For one-off builds or when you already have a USB to hand. Create the USB with R
 6. Leave all other settings as they are and click **START**
 7. Confirm the USB will be wiped and wait for Rufus to finish
 
-Once done, plug the USB into any PC with internet access and run `-PrepUSB`. The script picks it up automatically.
-
-**What -PrepUSB does:**
+**What `-PrepUSB` does:**
 
 1. Injects `ei.cfg` → forces Pro edition at setup, no edition selection screen
 2. Detects the CPU → determines which driver sets are needed
 3. Downloads the required drivers from this repo and injects them into `boot.wim` (so setup can see the hardware) and all indexes in `install.wim` (so the installed OS boots and operates correctly)
 
-If you are prepping the USB on a different machine to the one being built, the CPU won't match the target and drivers may be skipped. Use `-ForceDrivers` to inject all driver sets regardless:
+### Building an image on a separate machine
+
+Use this when you are prepping a USB or ISO on a different machine to the one being built — which is the normal workflow when deploying to multiple machines or when the target is being rebuilt from scratch.
+
+Because detection reads the hardware of the machine running the script, it won't see the target's CPU. Use `-ForceDrivers` to inject all driver sets regardless of what's detected locally.
+
+**Pre-staged USB** — create a Rufus USB as above, then run on your prep machine:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceDrivers
 ```
 
-### Option B — Pre-stage a golden ISO (-PatchISO)
-
-Better for repeated deployments. Patch a Windows 11 ISO once on a fast machine, then burn it to as many USBs as you need — no per-USB script run required.
-
-The ISO can also be hosted centrally (file share, Azure Blob, etc.) so the team is always burning from the same known-good image.
-
-**Requirements:** Windows ADK Deployment Tools — installed automatically if not present (~200MB download). A 10-second warning is shown before anything is downloaded.
-
-**Run:**
+**Pre-staged ISO** — patch a Windows 11 ISO once, then burn it to as many USBs as needed with Rufus — no per-USB script run required. The ISO can also be hosted centrally (file share, Azure Blob, etc.) so the team is always burning from the same known-good image.
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO -ForceDrivers
 ```
 
-A file picker opens for the source ISO, then a folder picker for the output location. The script does the rest — Pro edition config, driver injection into both WIM files, and repacks to a new `.iso` file. Burn the output with Rufus.
+A file picker opens for the source ISO, then a folder picker for the output location. The script injects Pro edition config and all driver sets into both WIM files, then repacks to a new `.iso`. Burn the output with Rufus.
 
-> This feature is untested end-to-end. If you run into problems, [raise an issue](https://github.com/FoobyGitHub/autopilot-prep-W11/issues).
+**Requirements for `-PatchISO`:** Windows ADK Deployment Tools — installed automatically if not present (~200MB download). A 10-second warning is shown before anything is downloaded.
 
 ---
 
