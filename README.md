@@ -29,7 +29,11 @@ Auto-detection works by querying the hardware on the machine running the script.
 
 In that case, use `-ForceWiFi` to inject the Wi-Fi/BT drivers unconditionally, regardless of what's detected on the prep machine.
 
-VMD detection uses the CPU of the machine running the script, so if you are patching on a different machine you should also check whether the target machine needs VMD injection and run on the correct platform where possible, or accept that VMD will only inject if the prep machine is also an affected Intel platform.
+VMD detection also uses the CPU of the machine running the script. If you are prepping on a different machine, use `-ForceVMD` to inject the VMD driver unconditionally. For a full cross-machine prep — covering both VMD storage and Wi-Fi/BT — combine the flags:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceVMD -ForceWiFi
+```
 
 ---
 
@@ -98,6 +102,12 @@ Once done, plug the USB into any PC with internet access and run `-PrepUSB`. The
 1. Injects `ei.cfg` → forces Pro edition at setup, no edition selection screen
 2. Detects the CPU → determines whether VMD injection is needed
 3. If needed, downloads the VMD driver from this repo and injects it into `boot.wim` (so setup can see the disk) and all indexes in `install.wim` (so the installed OS can boot)
+
+If you are prepping the USB on a different machine to the one being built, the CPU won't match the target and VMD may be skipped. Use `-ForceVMD` to inject regardless:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceVMD
+```
 
 ### 4. Injects Wi-Fi and Bluetooth drivers (if Intel BE201 detected)
 

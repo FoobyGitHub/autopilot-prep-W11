@@ -12,6 +12,7 @@ param(
     [switch]$CollectHash,
     [switch]$PatchISO,
     [switch]$ForceWiFi,
+    [switch]$ForceVMD,
     [string]$DriveLetter,
     [string]$OutputPath,
     [string]$TenantId,
@@ -48,6 +49,7 @@ if (-not $PrepUSB -and -not $CollectHash -and -not $PatchISO) {
     Write-Host "  -DriveLetter X              Force a specific drive letter for -PrepUSB  (e.g. -DriveLetter E)" -ForegroundColor White
     Write-Host "  -OutputPath path            Override the hash CSV save location" -ForegroundColor White
     Write-Host "  -ForceWiFi                  Force Wi-Fi/BT driver injection even if Intel BE201 is not detected on this machine. Use when prepping a USB or ISO on a different PC to the one being built." -ForegroundColor White
+    Write-Host "  -ForceVMD                   Force VMD driver injection even if the CPU on this machine does not require it. Use when prepping a USB or ISO on a different PC to the one being built." -ForegroundColor White
     Write-Host ""
     Write-Host "  Option 1 — certificate authentication (unattended, no browser prompt):" -ForegroundColor DarkGray
     Write-Host "  -TenantId <id>              Azure AD tenant ID" -ForegroundColor White
@@ -111,7 +113,14 @@ function Find-Windows11USB {
 # ── VMD detection helpers ──────────────────────────────────────────────────────
 
 function Get-CPUVMDStatus {
-    param([string]$CpuName)
+    param(
+        [string]$CpuName,
+        [bool]$Force = $false
+    )
+
+    if ($Force) {
+        return @{ NeedsVMD = $true; Reason = "-ForceVMD specified" }
+    }
 
     # AMD / Qualcomm / ARM — no VMD controller present
     if ($CpuName -match '(AMD|Ryzen|EPYC|Qualcomm|Snapdragon)') {
@@ -461,17 +470,20 @@ function Invoke-VMDDriverInjection {
         [string]$UsbRoot
     )
 
-    Write-Host "[PrepUSB] Detecting CPU generation for VMD requirement..." -ForegroundColor Cyan
-
-    try {
-        $cpuName = (Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name -First 1).Trim()
-        Write-Host "[PrepUSB] CPU: $cpuName" -ForegroundColor Cyan
-    } catch {
-        Write-Host "[PrepUSB] ERROR: Could not read CPU info — $_" -ForegroundColor Red
-        return $false
+    if ($ForceVMD.IsPresent) {
+        Write-Host "[PrepUSB] -ForceVMD specified — injecting VMD drivers regardless of detected CPU." -ForegroundColor Yellow
+        $vmdStatus = Get-CPUVMDStatus -CpuName '' -Force $true
+    } else {
+        Write-Host "[PrepUSB] Detecting CPU generation for VMD requirement..." -ForegroundColor Cyan
+        try {
+            $cpuName = (Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name -First 1).Trim()
+            Write-Host "[PrepUSB] CPU: $cpuName" -ForegroundColor Cyan
+        } catch {
+            Write-Host "[PrepUSB] ERROR: Could not read CPU info — $_" -ForegroundColor Red
+            return $false
+        }
+        $vmdStatus = Get-CPUVMDStatus -CpuName $cpuName
     }
-
-    $vmdStatus = Get-CPUVMDStatus -CpuName $cpuName
 
     if (-not $vmdStatus.NeedsVMD) {
         Write-Host "[PrepUSB] CPU does not require VMD driver — skipping injection." -ForegroundColor DarkGray
