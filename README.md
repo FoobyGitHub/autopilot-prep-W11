@@ -23,6 +23,16 @@ If you're not on an affected platform the script runs as normal — the VMD step
 
 ---
 
+## Running the script on a different machine
+
+Auto-detection works by querying the hardware on the machine running the script. If you are prepping a USB or patching an ISO on a separate PC — which is common, especially for `-PatchISO` — the target machine's hardware won't be visible.
+
+In that case, use `-ForceWiFi` to inject the Wi-Fi/BT drivers unconditionally, regardless of what's detected on the prep machine.
+
+VMD detection uses the CPU of the machine running the script, so if you are patching on a different machine you should also check whether the target machine needs VMD injection and run on the correct platform where possible, or accept that VMD will only inject if the prep machine is also an affected Intel platform.
+
+---
+
 ## Quick start
 
 Open PowerShell as Administrator (right-click → Run as administrator) and copy the command you need.
@@ -92,6 +102,14 @@ Once done, plug the USB into any PC with internet access and run `-PrepUSB`. The
 ### 4. Injects Wi-Fi and Bluetooth drivers (if Intel BE201 detected)
 
 If the machine running the script has an Intel BE201 (Wi-Fi 7) adapter, the script also injects the WLAN and Bluetooth drivers into both boot.wim and install.wim. This covers machines where Windows setup or first boot may not have inbox support for the BE201. Detection is automatic — if the adapter isn't present the step is skipped silently.
+
+If you are prepping the USB on a different machine to the one being built, auto-detection won't work — the adapter won't be present. Use `-ForceWiFi` to inject the drivers regardless:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceWiFi
+```
+
+Same applies to `-PatchISO -ForceWiFi`.
 
 ### Option B — Pre-stage a golden ISO (-PatchISO)
 

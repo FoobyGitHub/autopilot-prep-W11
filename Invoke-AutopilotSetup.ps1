@@ -11,6 +11,7 @@ param(
     [switch]$PrepUSB,
     [switch]$CollectHash,
     [switch]$PatchISO,
+    [switch]$ForceWiFi,
     [string]$DriveLetter,
     [string]$OutputPath,
     [string]$TenantId,
@@ -46,6 +47,7 @@ if (-not $PrepUSB -and -not $CollectHash -and -not $PatchISO) {
     Write-Host "  -PatchISO                   Pre-stage a Windows 11 ISO with VMD drivers and Pro edition config — outputs a patched ISO ready to burn with Rufus" -ForegroundColor White
     Write-Host "  -DriveLetter X              Force a specific drive letter for -PrepUSB  (e.g. -DriveLetter E)" -ForegroundColor White
     Write-Host "  -OutputPath path            Override the hash CSV save location" -ForegroundColor White
+    Write-Host "  -ForceWiFi                  Force Wi-Fi/BT driver injection even if Intel BE201 is not detected on this machine. Use when prepping a USB or ISO on a different PC to the one being built." -ForegroundColor White
     Write-Host ""
     Write-Host "  Option 1 — certificate authentication (unattended, no browser prompt):" -ForegroundColor DarkGray
     Write-Host "  -TenantId <id>              Azure AD tenant ID" -ForegroundColor White
@@ -270,6 +272,11 @@ function Invoke-WimVmdInjection {
 # ── Wi-Fi / BT detection and injection ────────────────────────────────────────
 
 function Get-WiFiDriverRequired {
+    param([bool]$Force = $false)
+    if ($Force) {
+        Write-Host "[PrepUSB] -ForceWiFi specified — injecting Wi-Fi/BT drivers regardless of detected hardware." -ForegroundColor Yellow
+        return $true
+    }
     Write-Host "[PrepUSB] Checking for Intel BE201 Wi-Fi 7 adapter..." -ForegroundColor Cyan
     try {
         $found = Get-WmiObject -Class Win32_PnPEntity |
@@ -492,7 +499,7 @@ function Invoke-VMDDriverInjection {
         return $false
     }
 
-    $wifiRequired = Get-WiFiDriverRequired
+    $wifiRequired = Get-WiFiDriverRequired -Force $ForceWiFi.IsPresent
     $result = Invoke-WimVmdInjection -Root $UsbRoot -DriverDir $tempDir -Tag '[PrepUSB]'
     Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     if (-not $result) { return $false }
@@ -1029,7 +1036,7 @@ function Invoke-PatchISO {
     }
 
     # ── Wi-Fi/BT driver injection (if Intel BE201 detected) ───────────────────
-    $wifiRequired = Get-WiFiDriverRequired
+    $wifiRequired = Get-WiFiDriverRequired -Force $ForceWiFi.IsPresent
     if ($wifiRequired) {
         $wifiOk = Invoke-WiFiDriverInjection -Root $stagingRoot -Tag '[PatchISO]'
         if (-not $wifiOk) {
