@@ -10,6 +10,7 @@
 param(
     [switch]$PrepUSB,
     [switch]$CollectHash,
+    [switch]$PatchISO,
     [string]$DriveLetter,
     [string]$OutputPath,
     [string]$TenantId,
@@ -37,11 +38,12 @@ Write-Host ""
 
 # ── Show help if no flags ──────────────────────────────────────────────────────
 
-if (-not $PrepUSB -and -not $CollectHash) {
+if (-not $PrepUSB -and -not $CollectHash -and -not $PatchISO) {
     Write-Host "No action specified. Available flags:" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  -CollectHash                Collect hash and upload to Intune (device code sign-in — browser prompted)" -ForegroundColor White
     Write-Host "  -PrepUSB                    Inject ei.cfg + VMD driver into a Windows 11 USB" -ForegroundColor White
+    Write-Host "  -PatchISO                   Pre-stage a Windows 11 ISO with VMD drivers and Pro edition config — outputs a patched ISO ready to burn with Rufus" -ForegroundColor White
     Write-Host "  -DriveLetter X              Force a specific drive letter for -PrepUSB  (e.g. -DriveLetter E)" -ForegroundColor White
     Write-Host "  -OutputPath path            Override the hash CSV save location" -ForegroundColor White
     Write-Host ""
@@ -66,6 +68,9 @@ if (-not $PrepUSB -and -not $CollectHash) {
     Write-Host ""
     Write-Host "  Do both in one shot:" -ForegroundColor DarkGray
     Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -CollectHash" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Pre-stage a patched ISO (file + folder pickers open automatically):" -ForegroundColor DarkGray
+    Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO" -ForegroundColor White
     Write-Host ""
     exit 0
 }
@@ -149,12 +154,124 @@ function Get-CPUVMDStatus {
     return @{ NeedsVMD = $false; Reason = "Intel CPU generation unrecognised ('$CpuName') — skipping VMD injection" }
 }
 
+function Invoke-WimVmdInjection {
+    param(
+        [string]$Root,
+        [string]$DriverDir,
+        [string]$Tag
+    )
+
+    # ── boot.wim injection (index 2) ──────────────────────────────────────────
+    $bootWim  = "${Root}sources\boot.wim"
+    $mountDir = Join-Path $env:TEMP "WimMount_$(Get-Random)"
+    New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
+    $dismOk = $false
+
+    Write-Host "$Tag Injecting VMD driver into boot.wim (index 2) using dism.exe..." -ForegroundColor Cyan
+
+    try {
+        & "$env:SystemRoot\System32\attrib.exe" -R "$bootWim" 2>&1 | Out-Null
+        Write-Host "$Tag Read-only attribute cleared on boot.wim." -ForegroundColor DarkGray
+
+        $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$bootWim" /Index:2 /MountDir:"$mountDir" 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+        $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$mountDir" /Add-Driver /Driver:"$DriverDir" /Recurse 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+        $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Commit 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+        $dismOk = $true
+
+    } catch {
+        Write-Host "$Tag ERROR: DISM injection into boot.wim failed — $_" -ForegroundColor Red
+    } finally {
+        if (-not $dismOk) {
+            & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
+        }
+        Remove-Item -Path $mountDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not $dismOk) { return $false }
+
+    Write-Host "$Tag VMD driver injected into boot.wim — disk will be detected automatically during Windows setup." -ForegroundColor Green
+
+    # ── install.wim injection (all indexes) ───────────────────────────────────
+    $installWim = "${Root}sources\install.wim"
+    $installEsd = "${Root}sources\install.esd"
+
+    if (-not (Test-Path $installWim)) {
+        if (Test-Path $installEsd) {
+            Write-Host "$Tag WARNING: install.esd detected (MCT-created USB) — install.wim injection skipped. Boot disk detection is fixed but OS may BSOD on first boot. Recreate the USB using Rufus (see README) for full VMD support." -ForegroundColor Yellow
+        } else {
+            Write-Host "$Tag WARNING: install.wim not found — skipping install.wim injection." -ForegroundColor Yellow
+        }
+        return $true
+    }
+
+    Write-Host "$Tag Enumerating install.wim indexes..." -ForegroundColor Cyan
+    $wimInfoOut = & "$env:SystemRoot\System32\dism.exe" /Get-WimInfo /WimFile:"$installWim" 2>&1
+    $indexCount = ($wimInfoOut | Select-String -Pattern '^\s*Index\s*:\s*\d+').Count
+
+    if ($indexCount -eq 0) {
+        Write-Host "$Tag ERROR: Could not determine index count from install.wim." -ForegroundColor Red
+        return $false
+    }
+
+    Write-Host "$Tag Found $indexCount index(es) in install.wim — injecting VMD driver into each..." -ForegroundColor Cyan
+
+    & "$env:SystemRoot\System32\attrib.exe" -R "$installWim" 2>&1 | Out-Null
+    Write-Host "$Tag Read-only attribute cleared on install.wim." -ForegroundColor DarkGray
+
+    $installOk = $true
+
+    for ($idx = 1; $idx -le $indexCount; $idx++) {
+        $installMountDir = Join-Path $env:TEMP "InstallWimMount_$(Get-Random)"
+        New-Item -ItemType Directory -Path $installMountDir -Force | Out-Null
+        $idxOk = $false
+
+        Write-Host "$Tag Processing install.wim index $idx of $indexCount..." -ForegroundColor Cyan
+
+        try {
+            $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$installWim" /Index:$idx /MountDir:"$installMountDir" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+            $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$installMountDir" /Add-Driver /Driver:"$DriverDir" /Recurse 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+            $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Commit 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+            $idxOk = $true
+
+        } catch {
+            Write-Host "$Tag ERROR: DISM injection into install.wim index $idx failed — $_" -ForegroundColor Red
+            $installOk = $false
+        } finally {
+            if (-not $idxOk) {
+                & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Discard 2>&1 | Out-Null
+            }
+            Remove-Item -Path $installMountDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        if (-not $idxOk) { break }
+    }
+
+    if (-not $installOk) {
+        Write-Host "$Tag ERROR: VMD injection into install.wim failed — see above." -ForegroundColor Red
+        return $false
+    }
+
+    Write-Host "$Tag VMD driver injected into install.wim ($indexCount indexes) — installed OS will boot correctly." -ForegroundColor Green
+    return $true
+}
+
 function Invoke-VMDDriverInjection {
     param(
         [string]$UsbRoot
     )
 
-    # ── Detect CPU ─────────────────────────────────────────────────────────────
     Write-Host "[PrepUSB] Detecting CPU generation for VMD requirement..." -ForegroundColor Cyan
 
     try {
@@ -174,19 +291,10 @@ function Invoke-VMDDriverInjection {
 
     Write-Host "[PrepUSB] $($vmdStatus.Reason)" -ForegroundColor Cyan
 
-    # ── Download VMD driver files from repo ────────────────────────────────────
-    $tempDir = Join-Path $env:TEMP "AutopilotVMD_$(Get-Random)"
+    $tempDir     = Join-Path $env:TEMP "AutopilotVMD_$(Get-Random)"
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-
-    $driverInfDir = $null
-    $repoBase     = "https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/drivers/VMD"
-    $driverFiles  = @(
-        'iaStorVD.cat',
-        'iaStorVD.inf',
-        'iaStorVD.sys',
-        'RstMwEventLogMsg.dll',
-        'RstMwService.exe'
-    )
+    $repoBase    = "https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/drivers/VMD"
+    $driverFiles = @('iaStorVD.cat','iaStorVD.inf','iaStorVD.sys','RstMwEventLogMsg.dll','RstMwService.exe')
 
     try {
         Write-Host "[PrepUSB] Downloading VMD driver files from repo..." -ForegroundColor Cyan
@@ -195,136 +303,16 @@ function Invoke-VMDDriverInjection {
             Invoke-WebRequest -Uri "$repoBase/$file" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
             Write-Host "[PrepUSB]   $file" -ForegroundColor DarkGray
         }
-
-        $driverInfDir = $tempDir
         Write-Host "[PrepUSB] Driver files ready." -ForegroundColor Cyan
-
     } catch {
-        Write-Host "[PrepUSB] ERROR: Could not download or extract Intel RST driver — $_" -ForegroundColor Red
+        Write-Host "[PrepUSB] ERROR: Could not download VMD driver files — $_" -ForegroundColor Red
         Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         return $false
     }
 
-    # ── DISM injection into boot.wim ───────────────────────────────────────────
-    # Uses inbox dism.exe (C:\Windows\System32\dism.exe) — no ADK required.
-    # Targets index 2 of boot.wim: the Windows Setup environment that runs during
-    # the "Where do you want to install Windows?" screen where disk detection occurs.
-
-    $bootWim  = "${UsbRoot}sources\boot.wim"
-    $mountDir = Join-Path $env:TEMP "WimMount_$(Get-Random)"
-    New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
-    $dismOk = $false
-
-    Write-Host "[PrepUSB] Injecting VMD driver into boot.wim (index 2) using dism.exe..." -ForegroundColor Cyan
-
-    try {
-        # attrib -R removes the read-only attribute — MCT marks boot.wim read-only on the USB
-        & "$env:SystemRoot\System32\attrib.exe" -R "$bootWim" 2>&1 | Out-Null
-        Write-Host "[PrepUSB] Read-only attribute cleared on boot.wim." -ForegroundColor DarkGray
-
-        $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$bootWim" /Index:2 /MountDir:"$mountDir" 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-        $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$mountDir" /Add-Driver /Driver:"$driverInfDir" /Recurse 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-        $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Commit 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-        $dismOk = $true
-
-    } catch {
-        Write-Host "[PrepUSB] ERROR: DISM injection failed — $_" -ForegroundColor Red
-    } finally {
-        if (-not $dismOk) {
-            & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
-        }
-        Remove-Item -Path $mountDir -Recurse -Force -ErrorAction SilentlyContinue
-        # $tempDir (driver files) kept alive — needed for install.wim injection below
-    }
-
-    if (-not $dismOk) {
-        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
-    Write-Host "[PrepUSB] VMD driver injected into boot.wim — disk will be detected automatically during Windows setup." -ForegroundColor Green
-
-    # ── DISM injection into install.wim ───────────────────────────────────────
-    # boot.wim covers setup/disk detection. install.wim carries the actual OS —
-    # injecting here ensures the installed Windows boots correctly on VMD machines.
-
-    $installWim = "${UsbRoot}sources\install.wim"
-    $installEsd = "${UsbRoot}sources\install.esd"
-
-    if (-not (Test-Path $installWim)) {
-        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path $installEsd) {
-            Write-Host "[PrepUSB] WARNING: install.esd detected (MCT-created USB) — install.wim injection skipped. Boot disk detection is fixed but OS may BSOD on first boot. Recreate the USB using Rufus (see README) for full VMD support." -ForegroundColor Yellow
-        } else {
-            Write-Host "[PrepUSB] WARNING: install.wim not found — skipping install.wim injection." -ForegroundColor Yellow
-        }
-        return $true
-    }
-
-    Write-Host "[PrepUSB] Enumerating install.wim indexes..." -ForegroundColor Cyan
-    $wimInfoOut = & "$env:SystemRoot\System32\dism.exe" /Get-WimInfo /WimFile:"$installWim" 2>&1
-    $indexCount = ($wimInfoOut | Select-String -Pattern '^\s*Index\s*:\s*\d+').Count
-
-    if ($indexCount -eq 0) {
-        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "[PrepUSB] ERROR: Could not determine index count from install.wim." -ForegroundColor Red
-        return $false
-    }
-
-    Write-Host "[PrepUSB] Found $indexCount index(es) in install.wim — injecting VMD driver into each..." -ForegroundColor Cyan
-
-    & "$env:SystemRoot\System32\attrib.exe" -R "$installWim" 2>&1 | Out-Null
-    Write-Host "[PrepUSB] Read-only attribute cleared on install.wim." -ForegroundColor DarkGray
-
-    $installOk = $true
-
-    for ($idx = 1; $idx -le $indexCount; $idx++) {
-        $installMountDir = Join-Path $env:TEMP "InstallWimMount_$(Get-Random)"
-        New-Item -ItemType Directory -Path $installMountDir -Force | Out-Null
-        $idxOk = $false
-
-        Write-Host "[PrepUSB] Processing install.wim index $idx of $indexCount..." -ForegroundColor Cyan
-
-        try {
-            $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$installWim" /Index:$idx /MountDir:"$installMountDir" 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$installMountDir" /Add-Driver /Driver:"$driverInfDir" /Recurse 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Commit 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $idxOk = $true
-
-        } catch {
-            Write-Host "[PrepUSB] ERROR: DISM injection into install.wim index $idx failed — $_" -ForegroundColor Red
-            $installOk = $false
-        } finally {
-            if (-not $idxOk) {
-                & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Discard 2>&1 | Out-Null
-            }
-            Remove-Item -Path $installMountDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-
-        if (-not $idxOk) { break }
-    }
-
+    $result = Invoke-WimVmdInjection -Root $UsbRoot -DriverDir $tempDir -Tag '[PrepUSB]'
     Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-
-    if (-not $installOk) {
-        Write-Host "[PrepUSB] ERROR: VMD injection into install.wim failed — see above." -ForegroundColor Red
-        return $false
-    }
-
-    Write-Host "[PrepUSB] VMD driver injected into install.wim ($indexCount indexes) — installed OS will boot correctly." -ForegroundColor Green
-    return $true
+    return $result
 }
 
 # ── PrepUSB ────────────────────────────────────────────────────────────────────
@@ -665,17 +653,232 @@ function Invoke-CollectHash {
     }
 }
 
+# ── PatchISO helpers ──────────────────────────────────────────────────────────
+
+function Show-FilePickerDialog {
+    [void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')
+    $dlg        = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Title  = 'Select Windows 11 ISO'
+    $dlg.Filter = 'ISO files (*.iso)|*.iso'
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        return $dlg.FileName
+    }
+    return $null
+}
+
+function Show-FolderPickerDialog {
+    [void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')
+    $dlg             = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = 'Select output folder for patched ISO'
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        return $dlg.SelectedPath
+    }
+    return $null
+}
+
+function Get-ADKOscdimg {
+    $paths = @(
+        'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe',
+        'C:\Program Files\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe'
+    )
+
+    foreach ($p in $paths) { if (Test-Path $p) { return $p } }
+
+    Write-Host "[PatchISO] Windows ADK (Deployment Tools) not found." -ForegroundColor Yellow
+    Write-Host "[PatchISO] The Deployment Tools feature (~200MB) will be downloaded and installed automatically." -ForegroundColor Yellow
+    Write-Host "[PatchISO] Press Ctrl+C now to cancel, or wait 10 seconds to continue..." -ForegroundColor Yellow
+
+    for ($i = 10; $i -gt 0; $i--) {
+        Write-Host "`r[PatchISO] Continuing in $i seconds..." -NoNewline
+        Start-Sleep -Seconds 1
+    }
+    Write-Host ""
+
+    $adkInstaller = "$env:TEMP\adksetup.exe"
+    $dlState      = @{ Done = $false; Err = $null; Pct = 0 }
+    $wc           = New-Object System.Net.WebClient
+
+    $sub1 = Register-ObjectEvent -InputObject $wc -EventName DownloadProgressChanged -MessageData $dlState -Action {
+        $Event.MessageData.Pct = $Event.SourceEventArgs.ProgressPercentage
+    }
+    $sub2 = Register-ObjectEvent -InputObject $wc -EventName DownloadFileCompleted -MessageData $dlState -Action {
+        $Event.MessageData.Done = $true
+        if ($Event.SourceEventArgs.Error) { $Event.MessageData.Err = $Event.SourceEventArgs.Error.Message }
+    }
+
+    $wc.DownloadFileAsync([Uri]'https://go.microsoft.com/fwlink/?linkid=2271337', $adkInstaller)
+
+    $lastPct = -1
+    while (-not $dlState.Done) {
+        Start-Sleep -Milliseconds 500
+        $pct = $dlState.Pct
+        if ($pct -ne $lastPct) {
+            $lastPct = $pct
+            Write-Host "`r[PatchISO] Downloading ADK: $pct%" -NoNewline
+        }
+    }
+    Write-Host ""
+
+    Unregister-Event -SubscriptionId $sub1.Id -ErrorAction SilentlyContinue
+    Unregister-Event -SubscriptionId $sub2.Id -ErrorAction SilentlyContinue
+    Remove-Job $sub1 -Force -ErrorAction SilentlyContinue
+    Remove-Job $sub2 -Force -ErrorAction SilentlyContinue
+    $wc.Dispose()
+
+    if ($dlState.Err) {
+        Write-Host "[PatchISO] ERROR: ADK download failed — $($dlState.Err)" -ForegroundColor Red
+        return $null
+    }
+
+    Write-Host "[PatchISO] Installing ADK Deployment Tools — this may take a few minutes..." -ForegroundColor Cyan
+    $proc = Start-Process -FilePath $adkInstaller -ArgumentList '/quiet /features OptionId.DeploymentTools /norestart' -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        Write-Host "[PatchISO] ERROR: ADK installation failed (exit $($proc.ExitCode))." -ForegroundColor Red
+        return $null
+    }
+
+    foreach ($p in $paths) { if (Test-Path $p) { return $p } }
+
+    Write-Host "[PatchISO] ERROR: oscdimg.exe not found after ADK installation. Check the installation manually." -ForegroundColor Red
+    return $null
+}
+
+function Invoke-PatchISO {
+    # ── Select ISO ────────────────────────────────────────────────────────────
+    $isoPath = Show-FilePickerDialog
+    if (-not $isoPath) {
+        Write-Host "[PatchISO] No ISO selected. Exiting." -ForegroundColor Yellow
+        return $false
+    }
+    Write-Host "[PatchISO] ISO selected: $isoPath" -ForegroundColor Cyan
+
+    # ── Locate oscdimg ────────────────────────────────────────────────────────
+    $oscdimg = Get-ADKOscdimg
+    if (-not $oscdimg) { return $false }
+
+    # ── Select output folder ──────────────────────────────────────────────────
+    $outputFolder = Show-FolderPickerDialog
+    if (-not $outputFolder) {
+        Write-Host "[PatchISO] No output folder selected. Exiting." -ForegroundColor Yellow
+        return $false
+    }
+
+    # ── Mount ISO ─────────────────────────────────────────────────────────────
+    Write-Host "[PatchISO] Mounting ISO..." -ForegroundColor Cyan
+    try {
+        $diskImg     = Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop
+        $driveLetter = ($diskImg | Get-Volume).DriveLetter
+        $mountDrive  = "${driveLetter}:\"
+        Write-Host "[PatchISO] ISO mounted at ${driveLetter}:" -ForegroundColor Green
+    } catch {
+        Write-Host "[PatchISO] ERROR: Could not mount ISO — $_" -ForegroundColor Red
+        return $false
+    }
+
+    # ── Copy to staging ───────────────────────────────────────────────────────
+    $stagingRoot = "$env:TEMP\W11PatchStaging\"
+    if (Test-Path $stagingRoot) {
+        Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+
+    Write-Host "[PatchISO] Copying ISO contents to temp staging folder — this may take a few minutes..." -ForegroundColor Cyan
+
+    & robocopy.exe $mountDrive $stagingRoot /E /COPYALL 2>&1 | Out-Null
+    $rcExit = $LASTEXITCODE
+
+    # robocopy exit codes 0-7 are success variants; 8+ are errors
+    if ($rcExit -ge 8) {
+        Write-Host "[PatchISO] ERROR: Robocopy failed (exit $rcExit)." -ForegroundColor Red
+        Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue
+        Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    Write-Host "[PatchISO] Copy complete." -ForegroundColor Cyan
+
+    # ── Dismount ISO ──────────────────────────────────────────────────────────
+    Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue
+    Write-Host "[PatchISO] ISO dismounted." -ForegroundColor DarkGray
+
+    # ── Inject ei.cfg ─────────────────────────────────────────────────────────
+    $eiCfgPath = "${stagingRoot}sources\ei.cfg"
+    $eiCfg     = "[EditionID]`r`nProfessional`r`n[Channel]`r`n_Default`r`n[VL]`r`n0`r`n"
+    Set-Content -Path $eiCfgPath -Value $eiCfg -Encoding ASCII -Force
+    Write-Host "[PatchISO] ei.cfg injected — USB will install Windows 11 Pro automatically." -ForegroundColor Green
+
+    # ── Download and inject VMD drivers ───────────────────────────────────────
+    $vmdTempDir  = Join-Path $env:TEMP "AutopilotVMD_$(Get-Random)"
+    New-Item -ItemType Directory -Path $vmdTempDir -Force | Out-Null
+    $driverOk    = $false
+    $repoBase    = "https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/drivers/VMD"
+    $driverFiles = @('iaStorVD.cat','iaStorVD.inf','iaStorVD.sys','RstMwEventLogMsg.dll','RstMwService.exe')
+
+    try {
+        Write-Host "[PatchISO] Downloading VMD driver files from repo..." -ForegroundColor Cyan
+        foreach ($file in $driverFiles) {
+            $dest = Join-Path $vmdTempDir $file
+            Invoke-WebRequest -Uri "$repoBase/$file" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            Write-Host "[PatchISO]   $file" -ForegroundColor DarkGray
+        }
+        Write-Host "[PatchISO] Driver files ready." -ForegroundColor Cyan
+        $driverOk = $true
+    } catch {
+        Write-Host "[PatchISO] ERROR: Could not download VMD driver files — $_" -ForegroundColor Red
+    }
+
+    if (-not $driverOk) {
+        Remove-Item -Path $vmdTempDir  -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    $vmdOk = Invoke-WimVmdInjection -Root $stagingRoot -DriverDir $vmdTempDir -Tag '[PatchISO]'
+    Remove-Item -Path $vmdTempDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    if (-not $vmdOk) {
+        Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    # ── Build patched ISO with oscdimg ────────────────────────────────────────
+    $isoBaseName   = [System.IO.Path]::GetFileNameWithoutExtension($isoPath)
+    $outputIsoPath = Join-Path $outputFolder "${isoBaseName}_patched.iso"
+    $etfsboot      = "${stagingRoot}boot\etfsboot.com"
+    $efisys        = "${stagingRoot}efi\microsoft\boot\efisys.bin"
+    $bootData      = "2#p0,e,b$etfsboot#pEF,e,b$efisys"
+
+    Write-Host "[PatchISO] Building patched ISO with oscdimg..." -ForegroundColor Cyan
+
+    $oscdimgOut = & $oscdimg -m -o -u2 -udfver102 "-bootdata:$bootData" $stagingRoot $outputIsoPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[PatchISO] ERROR: oscdimg failed (exit $LASTEXITCODE): $($oscdimgOut -join ' ')" -ForegroundColor Red
+        Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    Write-Host "[PatchISO] Patched ISO created: $outputIsoPath" -ForegroundColor Green
+    Write-Host "[PatchISO] Burn this ISO with Rufus to create deployment USBs — no further prep needed." -ForegroundColor Cyan
+
+    # ── Cleanup ───────────────────────────────────────────────────────────────
+    Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+    return $true
+}
+
 # ── Run ────────────────────────────────────────────────────────────────────────
 
 $usbOk  = $true
 $hashOk = $true
+$isoOk  = $true
 
 if ($PrepUSB)    { $usbOk  = Invoke-PrepUSB -Drive $DriveLetter; Write-Host "" }
 if ($CollectHash){ $hashOk = Invoke-CollectHash -OverridePath $OutputPath -TenantId $TenantId -AppClientId $AppClientId -AppCertThumbprint $AppCertThumbprint; Write-Host "" }
+if ($PatchISO)   { $isoOk  = Invoke-PatchISO; Write-Host "" }
 
 Write-Host "  ─────────────────────────────────" -ForegroundColor DarkGray
 if ($PrepUSB)    { Write-Host "  PrepUSB     $(if ($usbOk)  { 'Complete' } else { 'Failed' })" -ForegroundColor $(if ($usbOk)  { 'Green' } else { 'Red' }) }
 if ($CollectHash){ Write-Host "  CollectHash $(if ($hashOk) { 'Complete' } else { 'Failed' })" -ForegroundColor $(if ($hashOk) { 'Green' } else { 'Red' }) }
+if ($PatchISO)   { Write-Host "  PatchISO    $(if ($isoOk)  { 'Complete' } else { 'Failed' })" -ForegroundColor $(if ($isoOk)  { 'Green' } else { 'Red' }) }
 Write-Host ""
 
 if ($PrepUSB -and $usbOk) {

@@ -53,6 +53,12 @@ Run from an **elevated PowerShell prompt**. Copy the command for the task you ne
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -CollectHash
 ```
 
+**Pre-stage a patched ISO** — file and folder pickers open automatically:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO
+```
+
 **No flags** — prints a help screen with all options and the above commands ready to copy.
 
 ---
@@ -163,6 +169,38 @@ Insert a data USB into the target device and run `-CollectHash`. The script save
 2. Go to **Devices > Enroll devices > Windows enrollment > Devices**
 3. Click **Import** and upload each CSV
 4. Wait 5–15 minutes for devices to appear
+
+### Option 2 — Pre-stage a golden ISO (-PatchISO)
+
+For engineers who want to create a reusable patched ISO that can be burned to multiple USBs without running `-PrepUSB` each time.
+
+**Requirements:** Internet access (if ADK not installed). Windows ADK Deployment Tools (~200MB) — installed automatically if not present.
+
+**What it does:**
+- Prompts for the source Windows 11 ISO via file picker
+- Prompts for output folder via folder picker
+- Injects VMD drivers into both `boot.wim` and `install.wim`
+- Injects `ei.cfg` for Windows 11 Pro
+- Repacks to a new patched ISO using `oscdimg.exe`
+- Output ISO can be burned with Rufus directly — no `-PrepUSB` needed
+
+**Command:**
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO
+```
+
+**Workflow:**
+1. Run the command above from an elevated PowerShell prompt
+2. Select your Windows 11 ISO when the file picker opens
+3. Select your output folder
+4. Wait for patching to complete (5–15 minutes depending on hardware)
+5. Burn the output ISO with Rufus
+6. Every USB burned from this ISO is pre-patched — no further steps needed
+
+> **Note:** The first run will download and install Windows ADK Deployment Tools (~200MB) if not already present. A 10-second warning is shown before any download begins.
+
+---
 
 ### 2. Prep the install USB
 
