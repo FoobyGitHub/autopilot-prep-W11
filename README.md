@@ -4,9 +4,15 @@ Windows 11 Pro deployment toolkit for Microsoft 365 Business Premium environment
 
 **`-PrepUSB`** — takes a Windows 11 USB created with Rufus and prepares it for deployment: forces Pro edition via `ei.cfg`, detects the CPU, and injects the appropriate Intel drivers into `boot.wim` and `install.wim`. Run once per USB on any machine with internet access.
 
-**`-PatchISO`** — does the same to a Windows 11 ISO file and outputs a patched `.iso` ready to burn with Rufus. Patch once, burn as many times as needed.
+**`-PatchISO`** — does the same to a Windows 11 ISO file and outputs a patched `.iso` ready to burn with Rufus. Patch once, burn as many times as needed. This is the recommended approach for repeated deployments — pre-stage a single golden ISO on a fast prep machine, then burn it to as many USBs as needed with no further steps.
 
 **`-CollectHash`** — collects the device hardware hash and uploads it to Intune via Microsoft Graph. Run on the target device before or after the OS install.
+
+**`-ForceDrivers`** — use this when running `-PrepUSB` or `-PatchISO` on a different machine to the one being built. Driver detection reads the hardware on the machine running the script — if that's not the target, detection won't match and drivers will be skipped. `-ForceDrivers` bypasses detection and injects all four driver sets (VMD, Wi-Fi/BT, Chipset, Touchpad) regardless. For cross-machine prep this should be the default:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO -ForceDrivers
+```
 
 ---
 
