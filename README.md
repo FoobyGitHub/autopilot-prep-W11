@@ -4,84 +4,70 @@ Single-script Windows 11 Pro deployment toolkit for Microsoft 365 Business Premi
 
 ---
 
-## Quick reference
+## For field engineers — collect hardware hash
 
-Run from an **elevated PowerShell prompt**. Copy the base command, then append the flag you need.
-
-**Base command:**
+Insert a USB drive into the device, open **PowerShell as Administrator**, and run:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) <flags>
+irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1 | iex
 ```
 
-| Task | Flag |
-|---|---|
-| Collect hardware hash (saves to USB automatically) | `-CollectHash` |
-| Prep Windows 11 USB for Pro install | `-PrepUSB` |
-| Both at once | `-PrepUSB -CollectHash` |
-| Force a specific USB drive letter | `-PrepUSB -DriveLetter E` |
-| Override hash output path | `-CollectHash -OutputPath C:\Temp\hash.csv` |
+That is all. The script auto-detects the USB and saves `autopilot-<hostname>.csv` into an `AutopilotHashes\` folder on it. Multiple devices can share the same USB — each file is named after the device hostname.
 
 ---
 
-## Full examples
+## For IT — prep a Windows 11 USB for Pro install
+
+Write the Windows 11 ISO to a USB first (use [Media Creation Tool](https://www.microsoft.com/software-download/windows11) or [Rufus](https://rufus.ie)), insert it, then run from **PowerShell as Administrator**:
 
 ```powershell
-# Collect hash — insert a USB first, it auto-detects and saves there
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -CollectHash
-
-# Prep a Windows 11 USB for Pro install — auto-detects the USB
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
-
-# Prep USB on drive E: explicitly
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -DriveLetter E
-
-# Prep USB and collect hash in one shot
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -CollectHash
 ```
+
+To specify a drive letter manually:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -DriveLetter E
+```
+
+**Why this is needed:** OEM machines often ship with Windows 11 Home. Autopilot requires Windows 11 Pro (included in Microsoft 365 Business Premium). This injects an `ei.cfg` into the USB so Windows Setup installs Pro silently — no edition selection screen appears.
 
 ---
 
 ## Full deployment workflow
 
-### Step 1 — Collect the hardware hash
+### 1. Collect hardware hashes
 
-Insert a USB drive into the target device, then run:
+Run the simple one-liner on each target device (USB inserted). Gather all the CSV files from the `AutopilotHashes\` folder on the USB and import them into Intune:
 
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -CollectHash
-```
+**Intune admin centre > Devices > Enroll devices > Windows enrollment > Devices > Import**
 
-The script auto-detects the USB and saves `autopilot-<hostname>.csv` into an `AutopilotHashes\` folder on it. If no USB is found it falls back to the Public Desktop.
+Wait 5–15 minutes for devices to appear before proceeding.
 
-You can batch multiple machines onto the same USB — each device writes its own file named after its hostname.
+### 2. Prep the install USB
 
-**Import into Intune:**
+Run the `-PrepUSB` command on any PC with the Windows 11 USB inserted.
 
-1. Open [Intune admin centre](https://intune.microsoft.com)
-2. Go to **Devices > Enroll devices > Windows enrollment > Devices**
-3. Click **Import** and upload each CSV
-4. Wait 5–15 minutes for devices to appear
-
-### Step 2 — Prep the install USB
-
-Write the Windows 11 ISO to a USB first using the [Microsoft Media Creation Tool](https://www.microsoft.com/software-download/windows11) or [Rufus](https://rufus.ie), then run on any PC with the USB inserted:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
-```
-
-**Why this is needed:** OEM machines often ship with Windows 11 Home. Autopilot requires **Windows 11 Pro**, which is included in Microsoft 365 Business Premium. This injects an `ei.cfg` into the USB so Windows Setup installs Pro automatically with no manual edition selection.
-
-### Step 3 — Clean install and OOBE
+### 3. Clean install and OOBE
 
 1. Boot the target PC from the prepared USB
-2. Delete all existing partitions during setup for a clean install
+2. Delete all existing partitions for a clean install
 3. Windows 11 Pro installs automatically — no edition prompt
 4. At OOBE, **connect to the internet** — Autopilot detects the registered device and takes over
 5. The user signs in with their work account (`user@yourdomain.com`) and Intune enrols the device
 
 ---
+
+## All available flags
+
+| Flag | Description |
+|---|---|
+| _(none)_ | Collect hardware hash (default) |
+| `-CollectHash` | Collect hardware hash explicitly |
+| `-PrepUSB` | Inject `ei.cfg` into Windows 11 USB to force Pro edition |
+| `-PrepUSB -CollectHash` | Do both in one run |
+| `-DriveLetter E` | Force drive letter for `-PrepUSB` |
+| `-OutputPath C:\path\file.csv` | Override hash CSV save location |
 
 ## Requirements
 
@@ -94,7 +80,6 @@ Write the Windows 11 ISO to a USB first using the [Microsoft Media Creation Tool
 
 ## Notes
 
-- `irm` / scriptblock pattern runs the script in-memory — execution policy does not apply.
+- `irm | iex` runs the script in-memory — execution policy does not apply.
 - The hash CSV contains serial number, Windows product ID, and hardware hash only — no personal data.
-- Filenames include the device hostname (`autopilot-<hostname>.csv`) so multiple devices can share one USB.
-- If a device was previously registered under a different tenant, it must be deregistered there first.
+- If a device was previously registered in Autopilot under a different tenant, it must be deregistered there first.
