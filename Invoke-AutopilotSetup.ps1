@@ -1,13 +1,10 @@
 # Invoke-AutopilotSetup.ps1
 # Autopilot deployment tool for Microsoft 365 Business Premium environments.
 #
-# DEFAULT (no flags) — collect hardware hash, auto-saves to USB:
-#   irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1 | iex
+# Run from an elevated PowerShell prompt:
 #
-# PREP USB (forces Windows 11 Pro edition):
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -CollectHash
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
-#
-# BOTH at once:
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -CollectHash
 
 param(
@@ -17,16 +14,54 @@ param(
     [string]$OutputPath
 )
 
-# Default behaviour: collect hash
-if (-not $PrepUSB -and -not $CollectHash) {
-    $CollectHash = $true
-}
-
+# ── Execution policy ───────────────────────────────────────────────────────────
+# Required for Install-Script (PSGallery) to work. Scoped to current user only.
 Write-Host ""
 Write-Host "  Autopilot Setup Tool" -ForegroundColor Cyan
 Write-Host "  Microsoft 365 Business Premium" -ForegroundColor Cyan
 Write-Host "  ─────────────────────────────────" -ForegroundColor DarkGray
 Write-Host ""
+Write-Host "[Setup] Setting execution policy to RemoteSigned (CurrentUser)..." -ForegroundColor DarkGray
+
+try {
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force -ErrorAction Stop
+    Write-Host "[Setup] Execution policy set." -ForegroundColor DarkGray
+} catch {
+    Write-Host "[Setup] WARNING: Could not set execution policy: $_" -ForegroundColor Yellow
+    Write-Host "[Setup] Script installation from PSGallery may fail. Try running as Administrator." -ForegroundColor Yellow
+}
+
+Write-Host ""
+
+# ── Show help if no flags ──────────────────────────────────────────────────────
+
+if (-not $PrepUSB -and -not $CollectHash) {
+    Write-Host "No action specified. Available flags:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  -CollectHash       Collect Autopilot hardware hash, saves to USB (or desktop if no USB)" -ForegroundColor White
+    Write-Host "  -PrepUSB           Inject ei.cfg into a Windows 11 USB to force Pro edition install" -ForegroundColor White
+    Write-Host "  -DriveLetter <X>   Force a specific drive letter for -PrepUSB  (e.g. -DriveLetter E)" -ForegroundColor White
+    Write-Host "  -OutputPath <path> Override the hash CSV save location" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Examples (run from elevated PowerShell):" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Collect hash (insert USB first, auto-detects):" -ForegroundColor DarkGray
+    Write-Host '  & ([scriptblock]::Create((irm <url>))) -CollectHash' -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Prep a Windows 11 USB for Pro install:" -ForegroundColor DarkGray
+    Write-Host '  & ([scriptblock]::Create((irm <url>))) -PrepUSB' -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Prep USB on drive E: specifically:" -ForegroundColor DarkGray
+    Write-Host '  & ([scriptblock]::Create((irm <url>))) -PrepUSB -DriveLetter E' -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Do both in one shot:" -ForegroundColor DarkGray
+    Write-Host '  & ([scriptblock]::Create((irm <url>))) -PrepUSB -CollectHash' -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Replace <url> with:" -ForegroundColor DarkGray
+    Write-Host "  https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1" -ForegroundColor DarkGray
+    Write-Host ""
+    exit 0
+}
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
@@ -144,7 +179,7 @@ function Invoke-CollectHash {
 $usbOk  = $true
 $hashOk = $true
 
-if ($PrepUSB)    { $usbOk  = Invoke-PrepUSB -Drive $DriveLetter;         Write-Host "" }
+if ($PrepUSB)    { $usbOk  = Invoke-PrepUSB -Drive $DriveLetter;          Write-Host "" }
 if ($CollectHash){ $hashOk = Invoke-CollectHash -OverridePath $OutputPath; Write-Host "" }
 
 Write-Host "  ─────────────────────────────────" -ForegroundColor DarkGray
