@@ -10,7 +10,7 @@ The script sets the PowerShell execution policy automatically on every run, so y
 
 Run from an **elevated PowerShell prompt**. Copy the command for the task you need.
 
-**Collect hardware hash** — insert a USB first, the script auto-detects it:
+**Collect hardware hash** — insert a separate USB first, the script auto-detects it:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -CollectHash
@@ -38,11 +38,28 @@ Run from an **elevated PowerShell prompt**. Copy the command for the task you ne
 
 ---
 
+## USB detection
+
+The script distinguishes between two types of USB drive:
+
+| Drive type | How it is detected | Used for |
+|---|---|---|
+| Windows 11 install USB | Contains `sources\boot.wim` | `-PrepUSB` targets this drive |
+| Data USB (any other) | Any non-system drive without `boot.wim` | `-CollectHash` saves here |
+
+This means you can have the Windows 11 install USB plugged in at the same time as a data USB and each flag will target the correct drive automatically.
+
+If `-CollectHash` finds no data USB, it falls back to saving the CSV to the Public Desktop.
+
+> **Note:** The Microsoft Media Creation Tool labels the USB "ESD-USB" and does not always include `install.wim` or `install.esd` at the root of `sources\`. The script detects install media via `sources\boot.wim` instead, which is always present regardless of whether the USB was created with MCT or Rufus.
+
+---
+
 ## Full deployment workflow
 
 ### 1. Collect hardware hashes
 
-Insert a USB drive into the target device and run `-CollectHash`. The script saves `autopilot-<hostname>.csv` into an `AutopilotHashes\` folder on the USB. Multiple devices can share the same USB — each writes its own file named after its hostname. If no USB is found, the file is saved to the Public Desktop instead.
+Insert a data USB into the target device and run `-CollectHash`. The script saves `autopilot-<hostname>.csv` into an `AutopilotHashes\` folder on the USB. Multiple devices can share the same USB — each writes its own file named after its hostname. If no data USB is found, the file is saved to the Public Desktop.
 
 **Import into Intune once you have the CSVs:**
 
