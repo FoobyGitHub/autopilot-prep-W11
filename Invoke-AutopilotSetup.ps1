@@ -13,8 +13,8 @@ param(
     [string]$DriveLetter,
     [string]$OutputPath,
     [string]$TenantId,
-    [string]$ClientId,
-    [string]$ClientSecret
+    [string]$AppClientId,
+    [string]$AppCertThumbprint
 )
 
 # ── Execution policy ───────────────────────────────────────────────────────────
@@ -40,24 +40,23 @@ Write-Host ""
 if (-not $PrepUSB -and -not $CollectHash) {
     Write-Host "No action specified. Available flags:" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  -CollectHash          Collect hash and upload directly to Intune (browser sign-in — Option A)" -ForegroundColor White
-    Write-Host "  -PrepUSB              Inject ei.cfg + VMD driver into a Windows 11 USB" -ForegroundColor White
-    Write-Host "  -DriveLetter X        Force a specific drive letter for -PrepUSB  (e.g. -DriveLetter E)" -ForegroundColor White
-    Write-Host "  -OutputPath path      Override the hash CSV save location" -ForegroundColor White
+    Write-Host "  -CollectHash                Collect hash and upload to Intune (device code sign-in — browser prompted)" -ForegroundColor White
+    Write-Host "  -PrepUSB                    Inject ei.cfg + VMD driver into a Windows 11 USB" -ForegroundColor White
+    Write-Host "  -DriveLetter X              Force a specific drive letter for -PrepUSB  (e.g. -DriveLetter E)" -ForegroundColor White
+    Write-Host "  -OutputPath path            Override the hash CSV save location" -ForegroundColor White
     Write-Host ""
-    Write-Host "  Option B — silent app-based Intune upload (no browser prompt):" -ForegroundColor DarkGray
-    Write-Host "  -TenantId <id>        Azure AD tenant ID" -ForegroundColor White
-    Write-Host "  -ClientId <id>        App registration client ID" -ForegroundColor White
-    Write-Host "  -ClientSecret <val>   App registration client secret" -ForegroundColor White
-    Write-Host "  (Run -CollectHash with one or two of these to see full Option B setup instructions)" -ForegroundColor DarkGray
+    Write-Host "  Option 1 — certificate authentication (unattended, no browser prompt):" -ForegroundColor DarkGray
+    Write-Host "  -TenantId <id>              Azure AD tenant ID" -ForegroundColor White
+    Write-Host "  -AppClientId <id>           App registration client ID" -ForegroundColor White
+    Write-Host "  -AppCertThumbprint <val>    Certificate thumbprint (cert with private key in local machine store)" -ForegroundColor White
     Write-Host ""
     Write-Host "Copy and run one of these commands:" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  Collect hash + upload to Intune (browser sign-in):" -ForegroundColor DarkGray
+    Write-Host "  Collect hash + upload to Intune (device code sign-in):" -ForegroundColor DarkGray
     Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash" -ForegroundColor White
     Write-Host ""
-    Write-Host "  Collect hash + upload silently (app credentials — Option B):" -ForegroundColor DarkGray
-    Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash -TenantId <id> -ClientId <id> -ClientSecret <secret>" -ForegroundColor White
+    Write-Host "  Collect hash + upload silently (certificate auth — Option 1):" -ForegroundColor DarkGray
+    Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash -TenantId <id> -AppClientId <id> -AppCertThumbprint <thumbprint>" -ForegroundColor White
     Write-Host ""
     Write-Host "  Prep a Windows 11 USB for Pro install (auto-detects CPU, injects VMD driver if needed):" -ForegroundColor DarkGray
     Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB" -ForegroundColor White
@@ -385,33 +384,12 @@ function Invoke-PrepUSB {
 function Invoke-AutopilotGraphUpload {
     param(
         [string]$CsvPath,
-        [string]$TenantId,
-        [string]$ClientId,
-        [string]$ClientSecret
+        [string]$Token
     )
 
-    Write-Host "[CollectHash] Authenticating with Intune via app credentials (Option B)..." -ForegroundColor Cyan
-
-    $tokenUrl  = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
-    $tokenBody = "grant_type=client_credentials" +
-                 "&client_id=$([Uri]::EscapeDataString($ClientId))" +
-                 "&client_secret=$([Uri]::EscapeDataString($ClientSecret))" +
-                 "&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default"
-
-    try {
-        $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody `
-                             -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop
-        $token = $tokenResponse.access_token
-        Write-Host "[CollectHash] Authentication successful." -ForegroundColor Green
-    } catch {
-        Write-Host "[CollectHash] ERROR: Failed to obtain access token — $_" -ForegroundColor Red
-        Write-Host "[CollectHash] Verify TenantId, ClientId, ClientSecret and that admin consent has been granted." -ForegroundColor Yellow
-        return $false
-    }
-
-    $graphUrl = "https://graph.microsoft.com/v1.0/deviceManagement/importedWindowsAutopilotDeviceIdentities"
+    $graphUrl = "https://graph.microsoft.com/beta/deviceManagement/importedWindowsAutopilotDeviceIdentities"
     $headers  = @{
-        Authorization  = "Bearer $token"
+        Authorization  = "Bearer $Token"
         'Content-Type' = 'application/json'
     }
 
@@ -438,9 +416,125 @@ function Invoke-AutopilotGraphUpload {
     }
 
     if ($allOk) {
-        Write-Host "[CollectHash] Device registered in Intune — visible under Devices > Enroll devices > Windows enrollment > Devices within 5-15 minutes." -ForegroundColor Green
+        Write-Host "[CollectHash] Device registered in Intune — visible under Devices > Enroll devices > Windows enrollment > Devices within 15 minutes." -ForegroundColor Green
     }
     return $allOk
+}
+
+function Get-DeviceCodeToken {
+    $clientId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+    $scope    = 'https://graph.microsoft.com/DeviceManagementServiceConfig.ReadWrite.All'
+    $dcUrl    = 'https://login.microsoftonline.com/common/oauth2/v2.0/devicecode'
+    $dcBody   = "client_id=$clientId&scope=$([Uri]::EscapeDataString($scope))"
+
+    try {
+        $dcResp = Invoke-RestMethod -Uri $dcUrl -Method Post -Body $dcBody `
+                      -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop
+    } catch {
+        Write-Host "[CollectHash] ERROR: Could not initiate device code flow — $_" -ForegroundColor Red
+        return $null
+    }
+
+    $userCode   = $dcResp.user_code
+    $deviceCode = $dcResp.device_code
+    $interval   = [int]$dcResp.interval
+    $expiresIn  = [int]$dcResp.expires_in
+
+    Write-Host "[CollectHash] Open https://microsoft.com/devicelogin and enter code: $userCode" -ForegroundColor Cyan
+    Write-Host "[CollectHash] Waiting for sign-in (expires in $expiresIn seconds)..." -ForegroundColor DarkGray
+
+    $tokenUrl  = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
+    $tokenBody = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code" +
+                 "&client_id=$clientId" +
+                 "&device_code=$([Uri]::EscapeDataString($deviceCode))"
+
+    $elapsed = 0
+
+    while ($elapsed -lt $expiresIn) {
+        Start-Sleep -Seconds $interval
+        $elapsed += $interval
+
+        $pollErr = $null
+        $errBody = $null
+
+        try {
+            $tokResp = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody `
+                           -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop
+            Write-Host "[CollectHash] Authentication successful." -ForegroundColor Green
+            return $tokResp.access_token
+        } catch {
+            $pollErr = $_
+            if ($pollErr.Exception.Response) {
+                try {
+                    $stream  = $pollErr.Exception.Response.GetResponseStream()
+                    $reader  = New-Object System.IO.StreamReader($stream)
+                    $errBody = $reader.ReadToEnd()
+                    $reader.Dispose()
+                } catch {}
+            }
+
+            if ($errBody -and $errBody -match '"authorization_pending"') {
+                # User has not yet signed in — keep polling
+            } elseif ($errBody -and $errBody -match '"authorization_declined"') {
+                Write-Host "[CollectHash] Authentication declined by user." -ForegroundColor Red
+                return $null
+            } elseif ($errBody -and $errBody -match '"expired_token"') {
+                Write-Host "[CollectHash] Device code expired before sign-in completed." -ForegroundColor Red
+                return $null
+            } else {
+                if ($errBody) {
+                    Write-Host "[CollectHash] ERROR during authentication: $errBody" -ForegroundColor Red
+                } else {
+                    Write-Host "[CollectHash] ERROR during authentication: $pollErr" -ForegroundColor Red
+                }
+                return $null
+            }
+        }
+    }
+
+    Write-Host "[CollectHash] Timed out waiting for sign-in." -ForegroundColor Red
+    return $null
+}
+
+function New-CertJwtAssertion {
+    param(
+        [string]$TenantId,
+        [string]$AppClientId,
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert
+    )
+
+    $tokenUrl = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
+
+    # x5t: base64url encoding of the certificate SHA-1 hash bytes
+    $x5t = ([System.Convert]::ToBase64String($Cert.GetCertHash())) -replace '\+','-' -replace '/','_' -replace '=',''
+
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $exp = $now + 600
+    $jti = [Guid]::NewGuid().ToString()
+
+    $headerJson  = "{`"alg`":`"RS256`",`"typ`":`"JWT`",`"x5t`":`"$x5t`"}"
+    $payloadJson = "{`"aud`":`"$tokenUrl`",`"iss`":`"$AppClientId`",`"sub`":`"$AppClientId`",`"jti`":`"$jti`",`"nbf`":$now,`"exp`":$exp}"
+
+    $headerB64  = ([System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($headerJson)))  -replace '\+','-' -replace '/','_' -replace '=',''
+    $payloadB64 = ([System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($payloadJson))) -replace '\+','-' -replace '/','_' -replace '=',''
+    $sigInput   = "$headerB64.$payloadB64"
+    $inputBytes = [System.Text.Encoding]::ASCII.GetBytes($sigInput)
+
+    $privKey = $Cert.PrivateKey
+    if (-not $privKey) {
+        throw "Certificate '$($Cert.Thumbprint)' does not have an accessible private key. Ensure the certificate is installed with private key in the local machine cert store."
+    }
+
+    $sigBytes = $null
+    if ($privKey -is [System.Security.Cryptography.RSACryptoServiceProvider]) {
+        $sigBytes = $privKey.SignData($inputBytes, 'SHA256')
+    } else {
+        $rsa      = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Cert)
+        $sigBytes = $rsa.SignData($inputBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    }
+
+    $sigB64 = ([System.Convert]::ToBase64String($sigBytes)) -replace '\+','-' -replace '/','_' -replace '=',''
+    return "$sigInput.$sigB64"
 }
 
 # ── CollectHash ────────────────────────────────────────────────────────────────
@@ -449,32 +543,20 @@ function Invoke-CollectHash {
     param(
         [string]$OverridePath,
         [string]$TenantId,
-        [string]$ClientId,
-        [string]$ClientSecret
+        [string]$AppClientId,
+        [string]$AppCertThumbprint
     )
 
-    # ── Validate Option B credentials ──────────────────────────────────────────
-    $hasAllB = $TenantId -and $ClientId -and $ClientSecret
-    $hasAnyB = $TenantId -or  $ClientId -or  $ClientSecret
+    $useCertAuth = ($AppCertThumbprint -ne '')
 
-    if ($hasAnyB -and -not $hasAllB) {
-        Write-Host "[CollectHash] ERROR: Option B requires all three: -TenantId, -ClientId, and -ClientSecret." -ForegroundColor Red
-        Write-Host ""
-        Write-Host "  ── Option B setup (silent app-based Intune upload) ───────────────" -ForegroundColor Yellow
-        Write-Host "  1. Sign in to https://portal.azure.com" -ForegroundColor White
-        Write-Host "     Go to: Microsoft Entra ID > App registrations > New registration" -ForegroundColor White
-        Write-Host "     Name it (e.g. AutopilotHashUploader), single-tenant, no redirect URI" -ForegroundColor White
-        Write-Host "  2. On the overview page, note the Application (client) ID and Directory (tenant) ID" -ForegroundColor White
-        Write-Host "  3. Go to: API permissions > Add a permission > Microsoft Graph" -ForegroundColor White
-        Write-Host "     Select: Application permissions" -ForegroundColor White
-        Write-Host "     Search for and add: DeviceManagementServiceConfig.ReadWrite.All" -ForegroundColor White
-        Write-Host "     Then click: Grant admin consent for your tenant" -ForegroundColor White
-        Write-Host "  4. Go to: Certificates & secrets > New client secret" -ForegroundColor White
-        Write-Host "     Copy the Value immediately — it is not shown again after leaving the page" -ForegroundColor White
-        Write-Host "  5. Re-run with all three parameters:" -ForegroundColor White
-        Write-Host "     -CollectHash -TenantId <tenant-id> -ClientId <client-id> -ClientSecret <secret>" -ForegroundColor White
-        Write-Host "  ──────────────────────────────────────────────────────────────────" -ForegroundColor Yellow
-        Write-Host ""
+    # ── Validate cert auth params ──────────────────────────────────────────────
+    if ($useCertAuth -and -not $TenantId) {
+        Write-Host "[CollectHash] ERROR: -AppCertThumbprint requires -TenantId." -ForegroundColor Red
+        return $false
+    }
+    if ($useCertAuth -and -not $AppClientId) {
+        Write-Host "[CollectHash] ERROR: -AppCertThumbprint requires -AppClientId." -ForegroundColor Red
+        Write-Host "[CollectHash] Provide the Application (client) ID from your Entra app registration." -ForegroundColor Yellow
         return $false
     }
 
@@ -496,6 +578,7 @@ function Invoke-CollectHash {
         }
     }
 
+    # ── Install Get-WindowsAutopilotInfo ───────────────────────────────────────
     Write-Host "[CollectHash] Installing Get-WindowsAutopilotInfo..." -ForegroundColor Cyan
 
     try {
@@ -506,44 +589,79 @@ function Invoke-CollectHash {
         return $false
     }
 
+    # ── Collect hash to CSV ────────────────────────────────────────────────────
     Write-Host "[CollectHash] Collecting hardware hash for $(hostname)..." -ForegroundColor Cyan
 
-    if ($hasAllB) {
-        # ── Option B: collect CSV, then upload silently via Graph API ──────────
+    try {
+        Get-WindowsAutopilotInfo -OutputFile $outPath -ErrorAction Stop
+    } catch {
+        Write-Host "[CollectHash] ERROR: Get-WindowsAutopilotInfo failed: $_" -ForegroundColor Red
+        return $false
+    }
+
+    if (-not (Test-Path $outPath)) {
+        Write-Host "[CollectHash] ERROR: Hash file not found at $outPath after collection." -ForegroundColor Red
+        return $false
+    }
+
+    Write-Host "[CollectHash] Hash saved to: $outPath" -ForegroundColor Green
+
+    # ── Upload to Intune ───────────────────────────────────────────────────────
+    if ($useCertAuth) {
+        # ── Option 1: Certificate-based authentication (unattended) ───────────
+        Write-Host "[CollectHash] Using certificate authentication (Option 1 — unattended)" -ForegroundColor Cyan
+
+        $token = $null
         try {
-            Get-WindowsAutopilotInfo -OutputFile $outPath -ErrorAction Stop
+            $cert = Get-ChildItem -Path 'Cert:\LocalMachine\My' |
+                    Where-Object { $_.Thumbprint -eq $AppCertThumbprint } |
+                    Select-Object -First 1
+            if (-not $cert) {
+                $cert = Get-ChildItem -Path 'Cert:\CurrentUser\My' |
+                        Where-Object { $_.Thumbprint -eq $AppCertThumbprint } |
+                        Select-Object -First 1
+            }
+            if (-not $cert) {
+                throw "Certificate with thumbprint '$AppCertThumbprint' not found in LocalMachine\My or CurrentUser\My."
+            }
+
+            $assertion = New-CertJwtAssertion -TenantId $TenantId -AppClientId $AppClientId -Cert $cert
+
+            $tokenUrl  = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
+            $tokenBody = "grant_type=client_credentials" +
+                         "&client_id=$([Uri]::EscapeDataString($AppClientId))" +
+                         "&client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer" +
+                         "&client_assertion=$([Uri]::EscapeDataString($assertion))" +
+                         "&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default"
+
+            $tokResp = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody `
+                           -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop
+            $token = $tokResp.access_token
+            Write-Host "[CollectHash] Certificate authentication successful." -ForegroundColor Green
+
         } catch {
-            Write-Host "[CollectHash] ERROR: Get-WindowsAutopilotInfo failed: $_" -ForegroundColor Red
+            Write-Host "[CollectHash] ERROR: Certificate authentication failed — $_" -ForegroundColor Red
             return $false
         }
 
-        if (-not (Test-Path $outPath)) {
-            Write-Host "[CollectHash] ERROR: Hash file not found at $outPath after collection." -ForegroundColor Red
-            return $false
-        }
-
-        Write-Host "[CollectHash] Hash saved to: $outPath" -ForegroundColor Green
-        return Invoke-AutopilotGraphUpload -CsvPath $outPath -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+        return Invoke-AutopilotGraphUpload -CsvPath $outPath -Token $token
 
     } else {
-        # ── Option A: collect and upload via interactive browser sign-in ───────
-        Write-Host "[CollectHash] A browser sign-in window will open — sign in with your M365 admin account." -ForegroundColor Cyan
+        # ── Device code flow (default) ─────────────────────────────────────────
+        $token = Get-DeviceCodeToken
 
-        try {
-            Get-WindowsAutopilotInfo -OutputFile $outPath -Online -ErrorAction Stop
-        } catch {
-            Write-Host "[CollectHash] ERROR: Get-WindowsAutopilotInfo failed: $_" -ForegroundColor Red
-            return $false
-        }
-
-        if (Test-Path $outPath) {
-            Write-Host "[CollectHash] Hash saved to: $outPath" -ForegroundColor Green
-            Write-Host "[CollectHash] Device registered in Intune — visible under Devices > Enroll devices > Windows enrollment > Devices within 5-15 minutes." -ForegroundColor Green
+        if (-not $token) {
+            Write-Host "[CollectHash] Graph upload failed — CSV saved locally for manual import." -ForegroundColor Yellow
+            Write-Host "[CollectHash] Import: Intune > Devices > Enroll devices > Windows enrollment > Devices > Import" -ForegroundColor DarkGray
             return $true
-        } else {
-            Write-Host "[CollectHash] ERROR: Hash file not found at $outPath after collection." -ForegroundColor Red
-            return $false
         }
+
+        $uploadOk = Invoke-AutopilotGraphUpload -CsvPath $outPath -Token $token
+        if (-not $uploadOk) {
+            Write-Host "[CollectHash] Graph upload failed — CSV saved locally for manual import." -ForegroundColor Yellow
+            Write-Host "[CollectHash] Import: Intune > Devices > Enroll devices > Windows enrollment > Devices > Import" -ForegroundColor DarkGray
+        }
+        return $true
     }
 }
 
@@ -553,7 +671,7 @@ $usbOk  = $true
 $hashOk = $true
 
 if ($PrepUSB)    { $usbOk  = Invoke-PrepUSB -Drive $DriveLetter; Write-Host "" }
-if ($CollectHash){ $hashOk = Invoke-CollectHash -OverridePath $OutputPath -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret; Write-Host "" }
+if ($CollectHash){ $hashOk = Invoke-CollectHash -OverridePath $OutputPath -TenantId $TenantId -AppClientId $AppClientId -AppCertThumbprint $AppCertThumbprint; Write-Host "" }
 
 Write-Host "  ─────────────────────────────────" -ForegroundColor DarkGray
 if ($PrepUSB)    { Write-Host "  PrepUSB     $(if ($usbOk)  { 'Complete' } else { 'Failed' })" -ForegroundColor $(if ($usbOk)  { 'Green' } else { 'Red' }) }

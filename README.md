@@ -29,7 +29,7 @@ OEM machines frequently ship with Windows 11 Home. Microsoft 365 Business Premiu
 
 Run from an **elevated PowerShell prompt**. Copy the command for the task you need.
 
-**Collect hardware hash** — insert a separate USB first, the script auto-detects it:
+**Collect hardware hash** — uploads directly to Intune (browser sign-in prompted); insert a separate USB first for local CSV backup:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash
@@ -54,6 +54,47 @@ Run from an **elevated PowerShell prompt**. Copy the command for the task you ne
 ```
 
 **No flags** — prints a help screen with all options and the above commands ready to copy.
+
+---
+
+## Intune Upload
+
+The script uploads hardware hashes directly to Intune via Microsoft Graph — no CSV file to handle, no manual import step.
+
+### Option 3 — Device Code Flow (default, no setup required)
+
+When `-CollectHash` is run without any upload flags, the script collects the hash then prompts the technician to authenticate via browser:
+
+1. The script prints a code and the URL: `https://microsoft.com/devicelogin`
+2. The technician opens that URL in any browser, enters the code, and signs in
+3. The signed-in account must have the following Microsoft Graph permission (delegated): `DeviceManagementServiceConfig.ReadWrite.All`
+4. Once authenticated, the hash is uploaded automatically
+
+If the upload succeeds, the device appears in Intune within 15 minutes. If it fails or times out, the CSV is saved locally and the script prints manual import instructions.
+
+### Option 1 — Certificate Authentication (unattended, recommended for automation)
+
+> ⚠️ This feature is untested. If you encounter issues, please [log a bug](https://github.com/FoobyGitHub/autopilot-prep-W11/issues).
+
+Requires an Entra ID App Registration with:
+- API permission: `DeviceManagementServiceConfig.ReadWrite.All` (application, not delegated)
+- A certificate uploaded to the app registration (not a client secret)
+- The certificate private key installed in the local machine cert store on the machine running the script
+
+Run with:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash -TenantId "your-tenant-id" -AppClientId "your-app-client-id" -AppCertThumbprint "your-cert-thumbprint"
+```
+
+**Steps to set up the App Registration:**
+
+1. Go to **Entra ID → App registrations → New registration**
+2. Name it e.g. `Autopilot Hash Upload`
+3. Go to **API permissions → Add → Microsoft Graph → Application permissions → DeviceManagementServiceConfig.ReadWrite.All** → Grant admin consent
+4. Go to **Certificates & secrets → Certificates → Upload your certificate public key** (`.cer` file)
+5. Note the **Application (client) ID** and your **tenant ID**
+6. Install the certificate (with private key) into the local machine cert store on the prep machine
 
 ---
 
