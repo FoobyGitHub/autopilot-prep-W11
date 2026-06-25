@@ -6,12 +6,10 @@
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -CollectHash
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -CollectHash
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -SkipVMD
 
 param(
     [switch]$PrepUSB,
     [switch]$CollectHash,
-    [switch]$SkipVMD,
     [string]$DriveLetter,
     [string]$OutputPath
 )
@@ -41,7 +39,6 @@ if (-not $PrepUSB -and -not $CollectHash) {
     Write-Host ""
     Write-Host "  -CollectHash       Collect Autopilot hardware hash, saves to USB (or desktop if no USB)" -ForegroundColor White
     Write-Host "  -PrepUSB           Inject ei.cfg into a Windows 11 USB to force Pro edition install" -ForegroundColor White
-    Write-Host "  -SkipVMD           Skip Intel VMD driver detection and injection (use on 15th gen+ / AMD / Qualcomm)" -ForegroundColor White
     Write-Host "  -DriveLetter X     Force a specific drive letter for -PrepUSB  (e.g. -DriveLetter E)" -ForegroundColor White
     Write-Host "  -OutputPath path   Override the hash CSV save location" -ForegroundColor White
     Write-Host ""
@@ -52,9 +49,6 @@ if (-not $PrepUSB -and -not $CollectHash) {
     Write-Host ""
     Write-Host "  Prep a Windows 11 USB for Pro install (auto-detects CPU, injects VMD driver if needed):" -ForegroundColor DarkGray
     Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  Prep USB, skip VMD injection (15th gen Intel / AMD / Qualcomm machines):" -ForegroundColor DarkGray
-    Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -SkipVMD" -ForegroundColor White
     Write-Host ""
     Write-Host "  Prep USB on drive E specifically:" -ForegroundColor DarkGray
     Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -DriveLetter E" -ForegroundColor White
@@ -141,7 +135,7 @@ function Get-CPUVMDStatus {
     }
 
     # Unrecognised Intel CPU string — skip with a warning
-    return @{ NeedsVMD = $false; Reason = "Intel CPU generation unrecognised ('$CpuName') — skipping VMD (use -SkipVMD to suppress)" }
+    return @{ NeedsVMD = $false; Reason = "Intel CPU generation unrecognised ('$CpuName') — skipping VMD injection" }
 }
 
 function Get-IntelRSTDownloadUrl {
@@ -174,14 +168,8 @@ function Get-IntelRSTDownloadUrl {
 
 function Invoke-VMDDriverInjection {
     param(
-        [string]$UsbRoot,
-        [bool]$SkipVMD
+        [string]$UsbRoot
     )
-
-    if ($SkipVMD) {
-        Write-Host "[PrepUSB] VMD detection skipped (-SkipVMD specified)." -ForegroundColor DarkGray
-        return $true
-    }
 
     # ── Detect CPU ─────────────────────────────────────────────────────────────
     Write-Host "[PrepUSB] Detecting CPU generation for VMD requirement..." -ForegroundColor Cyan
@@ -292,8 +280,7 @@ function Invoke-VMDDriverInjection {
 
 function Invoke-PrepUSB {
     param(
-        [string]$Drive,
-        [bool]$SkipVMD
+        [string]$Drive
     )
 
     Write-Host "[PrepUSB] Looking for Windows 11 USB..." -ForegroundColor Cyan
@@ -335,7 +322,7 @@ function Invoke-PrepUSB {
     }
 
     # ── VMD driver detection and injection ─────────────────────────────────────
-    $vmdOk = Invoke-VMDDriverInjection -UsbRoot $root -SkipVMD $SkipVMD
+    $vmdOk = Invoke-VMDDriverInjection -UsbRoot $root
     if (-not $vmdOk) { return $false }
 
     return $true
@@ -397,7 +384,7 @@ function Invoke-CollectHash {
 $usbOk  = $true
 $hashOk = $true
 
-if ($PrepUSB)    { $usbOk  = Invoke-PrepUSB -Drive $DriveLetter -SkipVMD $SkipVMD.IsPresent; Write-Host "" }
+if ($PrepUSB)    { $usbOk  = Invoke-PrepUSB -Drive $DriveLetter; Write-Host "" }
 if ($CollectHash){ $hashOk = Invoke-CollectHash -OverridePath $OutputPath;                    Write-Host "" }
 
 Write-Host "  ─────────────────────────────────" -ForegroundColor DarkGray

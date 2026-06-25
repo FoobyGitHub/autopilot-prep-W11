@@ -22,12 +22,6 @@ Run from an **elevated PowerShell prompt**. Copy the command for the task you ne
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
 ```
 
-**Prep USB, skip VMD injection** — for 15th gen Intel, AMD, or Qualcomm machines:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -SkipVMD
-```
-
 **Prep USB on a specific drive letter:**
 
 ```powershell
@@ -110,8 +104,6 @@ Insert a data USB into the target device and run `-CollectHash`. The script save
 ### 2. Prep the install USB
 
 Write the Windows 11 ISO to a USB using the [Microsoft Media Creation Tool](https://www.microsoft.com/software-download/windows11) or [Rufus](https://rufus.ie), insert it into any PC, then run `-PrepUSB`. The script handles everything — Pro edition, VMD driver — automatically.
-
-Use `-SkipVMD` only if you know the target machine does not need VMD (15th gen Intel, AMD, Qualcomm). If in doubt, omit it — the script detects the CPU itself.
 
 ### 3. Clean install and OOBE
 
