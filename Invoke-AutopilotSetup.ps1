@@ -138,62 +138,6 @@ function Get-CPUVMDStatus {
     return @{ NeedsVMD = $false; Reason = "Intel CPU generation unrecognised ('$CpuName') — skipping VMD injection" }
 }
 
-function Get-IntelRSTDownloadUrl {
-    $apiUrl      = "https://www.intel.com/bin/downloadcollection.json?ids=720755"
-    $fallbackUrl = "https://downloadmirror.intel.com/720755/Intel-RST-VMD-Driver-Software_20.5.4.1.zip"
-
-    $headers = @{
-        'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-        'Accept'     = 'application/json, text/html, */*'
-    }
-
-    # ── Attempt 1: Intel download collection API ───────────────────────────────
-    Write-Host "[PrepUSB] Querying Intel download API for current RST driver URL..." -ForegroundColor Cyan
-    try {
-        $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -TimeoutSec 30 -ErrorAction Stop
-
-        # Walk the response object to find the first downloadmirror.intel.com URL
-        $url = $null
-        if ($response.downloads) {
-            foreach ($entry in $response.downloads) {
-                if ($entry.downloadUrl -match 'downloadmirror\.intel\.com') {
-                    $url = $entry.downloadUrl; break
-                }
-            }
-        }
-        if (-not $url -and $response -is [System.Collections.IEnumerable]) {
-            foreach ($item in $response) {
-                $candidate = $null
-                if     ($item.downloadUrl) { $candidate = $item.downloadUrl }
-                elseif ($item.url)         { $candidate = $item.url }
-                elseif ($item.href)        { $candidate = $item.href }
-                if ($candidate -match 'downloadmirror\.intel\.com') {
-                    $url = $candidate; break
-                }
-            }
-        }
-
-        if ($url) {
-            Write-Host "[PrepUSB] API returned driver URL: $url" -ForegroundColor Cyan
-            return $url
-        }
-        Write-Host "[PrepUSB] API response contained no download URL — trying fallback." -ForegroundColor Yellow
-    } catch {
-        Write-Host "[PrepUSB] API query failed ($_) — trying fallback." -ForegroundColor Yellow
-    }
-
-    # ── Attempt 2: Known stable direct URL ────────────────────────────────────
-    Write-Host "[PrepUSB] Using fallback driver URL: $fallbackUrl" -ForegroundColor Cyan
-    try {
-        $probe = Invoke-WebRequest -Uri $fallbackUrl -Method Head -Headers $headers -TimeoutSec 15 -ErrorAction Stop
-        if ($probe.StatusCode -eq 200) { return $fallbackUrl }
-    } catch {
-        Write-Host "[PrepUSB] Fallback URL probe failed: $_" -ForegroundColor Yellow
-    }
-
-    return $null
-}
-
 function Invoke-VMDDriverInjection {
     param(
         [string]$UsbRoot
@@ -219,41 +163,30 @@ function Invoke-VMDDriverInjection {
 
     Write-Host "[PrepUSB] $($vmdStatus.Reason)" -ForegroundColor Cyan
 
-    # ── Download Intel RST driver ───────────────────────────────────────────────
+    # ── Download VMD driver files from repo ────────────────────────────────────
     $tempDir = Join-Path $env:TEMP "AutopilotVMD_$(Get-Random)"
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
     $driverInfDir = $null
+    $repoBase     = "https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/drivers/VMD"
+    $driverFiles  = @(
+        'iaStorVD.cat',
+        'iaStorVD.inf',
+        'iaStorVD.sys',
+        'RstMwEventLogMsg.dll',
+        'RstMwService.exe'
+    )
 
     try {
-        $driverUrl = Get-IntelRSTDownloadUrl
-        if (-not $driverUrl) { throw "Could not obtain a driver download URL from Intel API or fallback." }
-        Write-Host "[PrepUSB] Downloading from: $driverUrl" -ForegroundColor Cyan
-
-        $archivePath = Join-Path $tempDir "rst_driver.zip"
-        Write-Host "[PrepUSB] Downloading Intel RST driver package..." -ForegroundColor Cyan
-        Invoke-WebRequest -Uri $driverUrl -OutFile $archivePath -UseBasicParsing -TimeoutSec 120
-
-        Write-Host "[PrepUSB] Extracting package..." -ForegroundColor Cyan
-        Expand-Archive -Path $archivePath -DestinationPath $tempDir -Force
-
-        # Locate VMD driver INF — iaStorVD.inf is the canonical VMD controller driver
-        $infFile = Get-ChildItem -Path $tempDir -Filter "iaStorVD.inf" -Recurse -ErrorAction SilentlyContinue |
-                   Select-Object -First 1
-
-        # Fallback: any INF inside a folder named VMD, RST, IRST, or iaStore
-        if (-not $infFile) {
-            $infFile = Get-ChildItem -Path $tempDir -Filter "*.inf" -Recurse -ErrorAction SilentlyContinue |
-                       Where-Object { $_.DirectoryName -match '(VMD|RST|IRST|iaStore)' } |
-                       Select-Object -First 1
+        Write-Host "[PrepUSB] Downloading VMD driver files from repo..." -ForegroundColor Cyan
+        foreach ($file in $driverFiles) {
+            $dest = Join-Path $tempDir $file
+            Invoke-WebRequest -Uri "$repoBase/$file" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            Write-Host "[PrepUSB]   $file" -ForegroundColor DarkGray
         }
 
-        if (-not $infFile) {
-            throw "iaStorVD.inf not found in extracted package — package structure may have changed"
-        }
-
-        $driverInfDir = $infFile.DirectoryName
-        Write-Host "[PrepUSB] Driver files located at: $driverInfDir" -ForegroundColor Cyan
+        $driverInfDir = $tempDir
+        Write-Host "[PrepUSB] Driver files ready." -ForegroundColor Cyan
 
     } catch {
         Write-Host "[PrepUSB] ERROR: Could not download or extract Intel RST driver — $_" -ForegroundColor Red
