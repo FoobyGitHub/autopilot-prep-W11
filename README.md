@@ -2,7 +2,7 @@
 
 Single-script Windows 11 Pro deployment toolkit for Microsoft 365 Business Premium / Intune / Autopilot environments.
 
-Designed for zero engineer decision-making: the script detects the hardware, downloads what it needs, and configures the USB automatically. The engineer runs one command and boots the machine.
+Designed for zero engineer decision-making: the script detects the hardware, fetches what it needs from this repo, and configures the USB automatically. The engineer runs one command and boots the machine.
 
 ---
 
@@ -57,13 +57,12 @@ Reads the CPU model using `Win32_Processor` and classifies it:
 | Intel Core Ultra Series 3+ (15th gen and newer) | No |
 | AMD / Qualcomm | No |
 
-### 3. Downloads and injects the Intel VMD driver (if required)
+### 3. Injects the Intel VMD driver (if required)
 
 If the CPU requires VMD, the script:
 
-1. Fetches the current Intel RST driver download URL dynamically from Intel's product page — no version number is hardcoded
-2. Downloads and extracts the driver package to a temp directory
-3. Uses **inbox `dism.exe`** (`C:\Windows\System32\dism.exe`) — no Windows ADK required — to inject the VMD driver into `boot.wim` index 2 on the USB
+1. Downloads the bundled VMD driver files directly from this repo (`drivers/VMD/`) — no dependency on Intel's website, no version lookups, no zip extraction
+2. Uses **inbox `dism.exe`** (`C:\Windows\System32\dism.exe`) — no Windows ADK required — to inject the VMD driver into `boot.wim` index 2 on the USB
 
 Index 2 is the Windows Setup environment that runs during the *"Where do you want to install Windows?"* screen. With the driver pre-injected, the NVMe/VMD storage controller is visible to setup automatically. **The engineer never needs to click "Load Driver".**
 
@@ -122,7 +121,7 @@ Write the Windows 11 ISO to a USB using the [Microsoft Media Creation Tool](http
 | Licence | Microsoft 365 Business Premium (includes Windows 11 Pro) |
 | PowerShell | 5.1 or later |
 | Elevation | Run as Administrator |
-| Internet | Required for Intel driver download, PSGallery, and Autopilot detection at OOBE |
+| Internet | Required for VMD driver fetch from GitHub, PSGallery (`-CollectHash`), and Autopilot detection at OOBE |
 | ADK | Not required — `dism.exe` is used from `C:\Windows\System32\` |
 
 ## Notes
