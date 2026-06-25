@@ -1,8 +1,25 @@
-# autopilot-info
+# autopilot-prep-W11
 
 Single-script Windows 11 Pro deployment toolkit for Microsoft 365 Business Premium / Intune / Autopilot environments.
 
-Designed for zero engineer decision-making: the script detects the hardware, fetches what it needs from this repo, and configures the USB automatically. The engineer runs one command and boots the machine.
+## Intel VMD disk controller — automatic detection and fix
+
+Many Intel 11th–14th gen machines (Tiger Lake through Raptor Lake Refresh) use an Intel VMD (Volume Management Device) controller to manage NVMe storage. Windows Setup does not include the VMD driver by default — without it, the disk is invisible at the *"Where do you want to install Windows?"* screen and the install cannot proceed.
+
+This script solves that automatically. It reads the CPU model, determines whether VMD injection is required, and if so injects the driver directly into `boot.wim` on the install USB using inbox `dism.exe` — before the machine ever boots from it. No engineer decision, no "Load Driver" prompt during setup, no manual driver handling.
+
+The bundled VMD driver covers:
+
+| Platform | VMD required |
+|---|---|
+| Intel 11th–14th gen Core i-series (Tiger Lake → Raptor Lake Refresh) | Yes — injected automatically |
+| Intel Core Ultra Series 1–2 (Meteor Lake / Arrow Lake / Lunar Lake) | Yes — injected automatically |
+| Intel Core Ultra Series 3+ / 15th gen and newer | No — skipped |
+| AMD / Qualcomm | No — skipped |
+
+## Windows 11 Pro edition enforcement
+
+OEM machines frequently ship with Windows 11 Home. Microsoft 365 Business Premium requires Windows 11 Pro for Autopilot enrolment to function correctly. The script injects an `ei.cfg` file into the USB so Windows Setup installs Pro silently — no edition selection screen, no risk of an engineer picking the wrong edition.
 
 ---
 
@@ -13,25 +30,25 @@ Run from an **elevated PowerShell prompt**. Copy the command for the task you ne
 **Collect hardware hash** — insert a separate USB first, the script auto-detects it:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -CollectHash
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash
 ```
 
 **Prep a Windows 11 USB for Pro install** — auto-detects the USB, CPU, and injects VMD driver if needed:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
 ```
 
 **Prep USB on a specific drive letter:**
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -DriveLetter E
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -DriveLetter E
 ```
 
 **Both at once:**
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -CollectHash
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -CollectHash
 ```
 
 **No flags** — prints a help screen with all options and the above commands ready to copy.
