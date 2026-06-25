@@ -139,31 +139,56 @@ function Get-CPUVMDStatus {
 }
 
 function Get-IntelRSTDownloadUrl {
-    # Fetches the current Intel RST/VMD driver download URL from Intel's product page.
-    # The product page permalink is stable across version changes — only the embedded
-    # download URL changes when Intel publishes a new release.
-    $productPage = "https://www.intel.com/content/www/us/en/download/720755/intel-rapid-storage-technology-driver-installation-software-with-intel-optane-memory-11th-generation-and-later.html"
+    $apiUrl      = "https://www.intel.com/bin/downloadcollection.json?ids=720755"
+    $fallbackUrl = "https://downloadmirror.intel.com/720755/Intel-RST-VMD-Driver-Software_20.5.4.1.zip"
 
-    Write-Host "[PrepUSB] Fetching Intel RST driver page to discover current download URL..." -ForegroundColor Cyan
-    $page = Invoke-WebRequest -Uri $productPage -UseBasicParsing -TimeoutSec 30
-    $html = $page.Content
-
-    # Pattern 1: JSON-embedded download URL present in Intel's page JS bundles
-    if ($html -match '"downloadUrl"\s*:\s*"(https://downloadmirror\.intel\.com/[^"]+\.(zip|exe))"') {
-        return $Matches[1]
+    $headers = @{
+        'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        'Accept'     = 'application/json, text/html, */*'
     }
 
-    # Pattern 2: anchor href pointing directly to downloadmirror
-    if ($html -match 'href="(https://downloadmirror\.intel\.com/\d+/[^"]+\.(zip|exe))"') {
-        return $Matches[1]
+    # ── Attempt 1: Intel download collection API ───────────────────────────────
+    Write-Host "[PrepUSB] Querying Intel download API for current RST driver URL..." -ForegroundColor Cyan
+    try {
+        $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -TimeoutSec 30 -ErrorAction Stop
+
+        # Walk the response object to find the first downloadmirror.intel.com URL
+        $url = $null
+        if ($response.downloads) {
+            foreach ($entry in $response.downloads) {
+                if ($entry.downloadUrl -match 'downloadmirror\.intel\.com') {
+                    $url = $entry.downloadUrl; break
+                }
+            }
+        }
+        if (-not $url -and $response -is [System.Collections.IEnumerable]) {
+            foreach ($item in $response) {
+                $candidate = $item.downloadUrl ?? $item.url ?? $item.DownloadUrl
+                if ($candidate -match 'downloadmirror\.intel\.com') {
+                    $url = $candidate; break
+                }
+            }
+        }
+
+        if ($url) {
+            Write-Host "[PrepUSB] API returned driver URL: $url" -ForegroundColor Cyan
+            return $url
+        }
+        Write-Host "[PrepUSB] API response contained no download URL — trying fallback." -ForegroundColor Yellow
+    } catch {
+        Write-Host "[PrepUSB] API query failed ($_) — trying fallback." -ForegroundColor Yellow
     }
 
-    # Pattern 3: data attribute variant used by some Intel page templates
-    if ($html -match 'data-href="(https://downloadmirror\.intel\.com/[^"]+)"') {
-        return $Matches[1]
+    # ── Attempt 2: Known stable direct URL ────────────────────────────────────
+    Write-Host "[PrepUSB] Using fallback driver URL: $fallbackUrl" -ForegroundColor Cyan
+    try {
+        $probe = Invoke-WebRequest -Uri $fallbackUrl -Method Head -Headers $headers -TimeoutSec 15 -ErrorAction Stop
+        if ($probe.StatusCode -eq 200) { return $fallbackUrl }
+    } catch {
+        Write-Host "[PrepUSB] Fallback URL probe failed: $_" -ForegroundColor Yellow
     }
 
-    throw "Could not extract a download URL from the Intel product page. Visit manually: $productPage"
+    return $null
 }
 
 function Invoke-VMDDriverInjection {
@@ -199,7 +224,8 @@ function Invoke-VMDDriverInjection {
 
     try {
         $driverUrl = Get-IntelRSTDownloadUrl
-        Write-Host "[PrepUSB] Driver URL: $driverUrl" -ForegroundColor Cyan
+        if (-not $driverUrl) { throw "Could not obtain a driver download URL from Intel API or fallback." }
+        Write-Host "[PrepUSB] Downloading from: $driverUrl" -ForegroundColor Cyan
 
         $archivePath = Join-Path $tempDir "rst_driver.zip"
         Write-Host "[PrepUSB] Downloading Intel RST driver package..." -ForegroundColor Cyan
