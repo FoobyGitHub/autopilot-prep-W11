@@ -89,6 +89,10 @@ Once done, plug the USB into any PC with internet access and run `-PrepUSB`. The
 2. Detects the CPU → determines whether VMD injection is needed
 3. If needed, downloads the VMD driver from this repo and injects it into `boot.wim` (so setup can see the disk) and all indexes in `install.wim` (so the installed OS can boot)
 
+### 4. Injects Wi-Fi and Bluetooth drivers (if Intel BE201 detected)
+
+If the machine running the script has an Intel BE201 (Wi-Fi 7) adapter, the script also injects the WLAN and Bluetooth drivers into both boot.wim and install.wim. This covers machines where Windows setup or first boot may not have inbox support for the BE201. Detection is automatic — if the adapter isn't present the step is skipped silently.
+
 ### Option B — Pre-stage a golden ISO (-PatchISO)
 
 Better for repeated deployments. Patch a Windows 11 ISO once on a fast machine, then burn it to as many USBs as you need — no per-USB script run required.

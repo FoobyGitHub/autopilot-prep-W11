@@ -267,6 +267,188 @@ function Invoke-WimVmdInjection {
     return $true
 }
 
+# ── Wi-Fi / BT detection and injection ────────────────────────────────────────
+
+function Get-WiFiDriverRequired {
+    Write-Host "[PrepUSB] Checking for Intel BE201 Wi-Fi 7 adapter..." -ForegroundColor Cyan
+    try {
+        $found = Get-WmiObject -Class Win32_PnPEntity |
+                 Where-Object { $_.PNPDeviceID -match 'DEV_272B' } |
+                 Select-Object -First 1
+        if ($found) {
+            Write-Host "[PrepUSB] Intel BE201 detected — Wi-Fi/BT driver injection required." -ForegroundColor Yellow
+            return $true
+        }
+        Write-Host "[PrepUSB] Intel BE201 not detected — skipping Wi-Fi/BT driver injection." -ForegroundColor DarkGray
+        return $false
+    } catch {
+        Write-Host "[PrepUSB] WARNING: Could not query PnP devices for BE201 detection — $_" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+function Invoke-WiFiDriverInjection {
+    param(
+        [string]$Root,
+        [string]$Tag
+    )
+
+    $stagingDir = "$env:TEMP\WiFiDriverStaging"
+    if (Test-Path $stagingDir) {
+        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+    # Enumerate files from the repo tree then download each one
+    $apiUrl    = 'https://api.github.com/repos/FoobyGitHub/autopilot-prep-W11/git/trees/main?recursive=1'
+    $wifiFiles = $null
+    try {
+        $tree      = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -ErrorAction Stop
+        $wifiFiles = $tree.tree | Where-Object { $_.type -eq 'blob' -and $_.path -like 'drivers/WiFi/*' }
+    } catch {
+        Write-Host "$Tag ERROR: Could not fetch Wi-Fi driver file list from GitHub — $_" -ForegroundColor Red
+        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    if (-not $wifiFiles) {
+        Write-Host "$Tag ERROR: No Wi-Fi driver files found in repo at drivers/WiFi/." -ForegroundColor Red
+        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    $repoBase = 'https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main'
+    Write-Host "$Tag Downloading Wi-Fi/BT driver files from repo..." -ForegroundColor Cyan
+
+    try {
+        foreach ($file in $wifiFiles) {
+            $relPath = $file.path -replace '^drivers/WiFi/', ''
+            $dest    = Join-Path $stagingDir ($relPath -replace '/', '\')
+            $destDir = Split-Path $dest -Parent
+            if (-not (Test-Path $destDir)) {
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+            }
+            Invoke-WebRequest -Uri "$repoBase/$($file.path)" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            Write-Host "$Tag   $relPath" -ForegroundColor DarkGray
+        }
+        Write-Host "$Tag Driver files ready." -ForegroundColor Cyan
+    } catch {
+        Write-Host "$Tag ERROR: Could not download Wi-Fi/BT driver files — $_" -ForegroundColor Red
+        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    # ── boot.wim injection (index 2) ──────────────────────────────────────────
+    $bootWim  = "${Root}sources\boot.wim"
+    $mountDir = Join-Path $env:TEMP "WimMount_$(Get-Random)"
+    New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
+    $bootOk   = $false
+
+    Write-Host "$Tag Injecting Wi-Fi/BT driver into boot.wim (index 2) using dism.exe..." -ForegroundColor Cyan
+
+    try {
+        & "$env:SystemRoot\System32\attrib.exe" -R "$bootWim" 2>&1 | Out-Null
+        Write-Host "$Tag Read-only attribute cleared on boot.wim." -ForegroundColor DarkGray
+
+        $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$bootWim" /Index:2 /MountDir:"$mountDir" 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+        $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$mountDir" /Add-Driver /Driver:"$stagingDir" /Recurse 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+        $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Commit 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+        $bootOk = $true
+
+    } catch {
+        Write-Host "$Tag ERROR: DISM injection into boot.wim failed — $_" -ForegroundColor Red
+    } finally {
+        if (-not $bootOk) {
+            & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
+        }
+        Remove-Item -Path $mountDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not $bootOk) {
+        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    # ── install.wim injection (all indexes) ───────────────────────────────────
+    $installWim = "${Root}sources\install.wim"
+    $installEsd = "${Root}sources\install.esd"
+
+    if (-not (Test-Path $installWim)) {
+        if (Test-Path $installEsd) {
+            Write-Host "$Tag WARNING: install.esd detected (MCT-created USB) — install.wim injection skipped. Boot disk detection is fixed but OS may BSOD on first boot. Recreate the USB using Rufus (see README) for full VMD support." -ForegroundColor Yellow
+        } else {
+            Write-Host "$Tag WARNING: install.wim not found — skipping install.wim injection." -ForegroundColor Yellow
+        }
+        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+
+    Write-Host "$Tag Enumerating install.wim indexes for Wi-Fi/BT injection..." -ForegroundColor Cyan
+    $wimInfoOut = & "$env:SystemRoot\System32\dism.exe" /Get-WimInfo /WimFile:"$installWim" 2>&1
+    $indexCount = ($wimInfoOut | Select-String -Pattern '^\s*Index\s*:\s*\d+').Count
+
+    if ($indexCount -eq 0) {
+        Write-Host "$Tag ERROR: Could not determine index count from install.wim." -ForegroundColor Red
+        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    Write-Host "$Tag Found $indexCount index(es) in install.wim — injecting Wi-Fi/BT driver into each..." -ForegroundColor Cyan
+
+    & "$env:SystemRoot\System32\attrib.exe" -R "$installWim" 2>&1 | Out-Null
+    Write-Host "$Tag Read-only attribute cleared on install.wim." -ForegroundColor DarkGray
+
+    $installOk = $true
+
+    for ($idx = 1; $idx -le $indexCount; $idx++) {
+        $installMountDir = Join-Path $env:TEMP "InstallWimMount_$(Get-Random)"
+        New-Item -ItemType Directory -Path $installMountDir -Force | Out-Null
+        $idxOk = $false
+
+        Write-Host "$Tag Processing install.wim index $idx of $indexCount..." -ForegroundColor Cyan
+
+        try {
+            $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$installWim" /Index:$idx /MountDir:"$installMountDir" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+            $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$installMountDir" /Add-Driver /Driver:"$stagingDir" /Recurse 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+            $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Commit 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
+
+            $idxOk = $true
+
+        } catch {
+            Write-Host "$Tag ERROR: DISM injection into install.wim index $idx failed — $_" -ForegroundColor Red
+            $installOk = $false
+        } finally {
+            if (-not $idxOk) {
+                & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Discard 2>&1 | Out-Null
+            }
+            Remove-Item -Path $installMountDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        if (-not $idxOk) { break }
+    }
+
+    Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    if (-not $installOk) {
+        Write-Host "$Tag ERROR: Wi-Fi/BT injection into install.wim failed — see above." -ForegroundColor Red
+        return $false
+    }
+
+    Write-Host "$Tag Wi-Fi/BT driver injected into boot.wim and install.wim." -ForegroundColor Green
+    return $true
+}
+
 function Invoke-VMDDriverInjection {
     param(
         [string]$UsbRoot
@@ -310,9 +492,15 @@ function Invoke-VMDDriverInjection {
         return $false
     }
 
+    $wifiRequired = Get-WiFiDriverRequired
     $result = Invoke-WimVmdInjection -Root $UsbRoot -DriverDir $tempDir -Tag '[PrepUSB]'
     Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-    return $result
+    if (-not $result) { return $false }
+    if ($wifiRequired) {
+        $wifiResult = Invoke-WiFiDriverInjection -Root $UsbRoot -Tag '[PrepUSB]'
+        if (-not $wifiResult) { return $false }
+    }
+    return $true
 }
 
 # ── PrepUSB ────────────────────────────────────────────────────────────────────
@@ -838,6 +1026,16 @@ function Invoke-PatchISO {
     if (-not $vmdOk) {
         Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
         return $false
+    }
+
+    # ── Wi-Fi/BT driver injection (if Intel BE201 detected) ───────────────────
+    $wifiRequired = Get-WiFiDriverRequired
+    if ($wifiRequired) {
+        $wifiOk = Invoke-WiFiDriverInjection -Root $stagingRoot -Tag '[PatchISO]'
+        if (-not $wifiOk) {
+            Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
     }
 
     # ── Build patched ISO with oscdimg ────────────────────────────────────────
