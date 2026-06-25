@@ -1,50 +1,92 @@
 # autopilot-info
 
-A lightweight PowerShell script that collects the Windows Autopilot hardware hash from a device and saves it as a CSV file ready for upload to Microsoft Intune.
+Scripts for deploying Windows 11 Pro via Microsoft Autopilot with Microsoft 365 Business Premium.
 
-## Quick start — one-liner
+---
 
-Run this in an elevated PowerShell prompt on the target device. No download required.
+## Overview
+
+This repo covers the two-step process for clean-building a PC into your Intune/Autopilot environment:
+
+1. **Prep the install USB** — force Windows 11 Pro edition so Autopilot can enrol the device
+2. **Collect the hardware hash** — register the device in Autopilot before (or after) the install
+
+---
+
+## Step 1 — Prep a Windows 11 Pro install USB
+
+### Why this is needed
+
+OEM machines often ship with Windows 11 Home. Intune and Autopilot require **Windows 11 Pro**, which is included in your Microsoft 365 Business Premium licence. By default, Windows Setup selects the edition silently based on OEM keys — this script overrides that by injecting an `ei.cfg` file into the USB that forces Pro.
+
+### Prerequisites
+
+- A USB drive (8 GB+) with the Windows 11 ISO already written to it
+  - Use the [Microsoft Media Creation Tool](https://www.microsoft.com/software-download/windows11) or [Rufus](https://rufus.ie)
+- Run the script from an **elevated PowerShell prompt** on any Windows machine
+
+### One-liner
+
+```powershell
+irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Set-Win11ProUSB.ps1 | iex
+```
+
+Or if you want to specify the drive letter directly:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Set-Win11ProUSB.ps1))) -DriveLetter E
+```
+
+### What it does
+
+- Scans for a USB drive containing Windows 11 setup files
+- Writes an `ei.cfg` to the `sources\` folder on the USB that tells Windows Setup to install **Professional** edition automatically — no edition selection screen appears during setup
+
+---
+
+## Step 2 — Collect the Autopilot hardware hash
+
+Run this on the **target device** (before or after the Windows install — most commonly before reimaging, or on a freshly installed machine before handing it to the user).
+
+### One-liner
 
 ```powershell
 irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-info/main/Get-AutopilotHash.ps1 | iex
 ```
 
-`irm` (Invoke-RestMethod) downloads the script as a string; `iex` (Invoke-Expression) executes it directly in the current session — no file saved, no execution policy prompt.
+This saves `autopilot.csv` to `C:\Users\Public\Desktop\`.
 
-## What it does
+### Import the CSV into Intune
 
-1. Sets the PowerShell execution policy to `RemoteSigned` for the current user
-2. Installs the `Get-WindowsAutopilotInfo` script from the PowerShell Gallery
-3. Runs the script and saves the hardware hash to `C:\Users\Public\Desktop\autopilot.csv`
+1. Open [Intune admin centre](https://intune.microsoft.com)
+2. Go to **Devices > Enroll devices > Windows enrollment > Devices**
+3. Click **Import** and upload `autopilot.csv`
+4. Wait for the device to appear (can take 5–15 minutes)
 
-## Usage — running the script file directly
+---
 
-If you prefer to download and inspect the script first:
+## Step 3 — Clean install and OOBE
 
-**Option A — Right-click**
+1. Boot the target PC from the prepared USB
+2. Delete all existing partitions during setup for a clean install
+3. Windows 11 Pro installs automatically (no edition prompt)
+4. At the Out of Box Experience (OOBE), **connect to the internet**
+5. Autopilot detects the registered device and takes over — the user signs in with their work account (`user@yourdomain.com`) and Intune enrols the device automatically
 
-1. Download `Get-AutopilotHash.ps1`
-2. Right-click the file → **Run with PowerShell**
-
-**Option B — Elevated prompt**
-
-```powershell
-.\Get-AutopilotHash.ps1
-```
-
-## Output
-
-A file named `autopilot.csv` is saved to the Public Desktop (`C:\Users\Public\Desktop\`). This file can be imported directly into **Microsoft Intune > Devices > Enroll devices > Windows enrollment > Automatic Enrollment > Import**.
+---
 
 ## Requirements
 
-- Windows 10 / 11
-- PowerShell 5.1 or later
-- Internet access (to reach the PowerShell Gallery and the raw GitHub URL)
-- Administrator rights recommended — required for `Install-Script` to write to the system script path
+| Requirement | Detail |
+|---|---|
+| Licence | Microsoft 365 Business Premium (includes Windows 11 Pro) |
+| Edition | Windows 11 Pro (not Home) |
+| PowerShell | 5.1 or later |
+| Internet access | Required for PowerShell Gallery and Autopilot detection at OOBE |
+| Admin rights | Required for `Install-Script` and writing to the USB |
 
 ## Notes
 
-- When using the one-liner, execution policy is irrelevant — `iex` runs a string, not a file on disk, so the policy check is bypassed entirely.
-- The output CSV contains the device serial number, Windows product ID, and hardware hash — no personal user data.
+- When using `irm | iex`, execution policy is irrelevant — the script runs as a string in-memory, bypassing file-based policy checks.
+- The hardware hash CSV contains serial number, Windows product ID, and hardware hash only — no personal user data.
+- If a device was previously registered in Autopilot under a different tenant, it must be deregistered first.
