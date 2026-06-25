@@ -261,11 +261,11 @@ function Invoke-VMDDriverInjection {
     if (-not (Test-Path $installWim)) {
         Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         if (Test-Path $installEsd) {
-            Write-Host "[PrepUSB] WARNING: USB was created with MCT in ESD format — DISM cannot modify install.esd. Recreate the USB using Rufus with the ISO in WIM mode, then re-run -PrepUSB." -ForegroundColor Yellow
+            Write-Host "[PrepUSB] WARNING: install.esd detected (MCT-created USB) — install.wim injection skipped. Boot disk detection is fixed but OS may BSOD on first boot. Recreate the USB using Rufus (see README) for full VMD support." -ForegroundColor Yellow
         } else {
             Write-Host "[PrepUSB] WARNING: install.wim not found — skipping install.wim injection." -ForegroundColor Yellow
         }
-        return $false
+        return $true
     }
 
     Write-Host "[PrepUSB] Enumerating install.wim indexes..." -ForegroundColor Cyan

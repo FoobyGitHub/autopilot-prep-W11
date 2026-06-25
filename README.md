@@ -8,6 +8,8 @@ Many Intel 11th–14th gen machines (Tiger Lake through Raptor Lake Refresh) use
 
 This script solves that automatically. It reads the CPU model, determines whether VMD injection is required, and if so injects the driver directly into `boot.wim` on the install USB using inbox `dism.exe` — before the machine ever boots from it. No engineer decision, no "Load Driver" prompt during setup, no manual driver handling.
 
+> **The install USB must be created with [Rufus](https://rufus.ie).** Microsoft Media Creation Tool produces ESD-format USBs that DISM cannot modify — the VMD driver cannot be injected into `install.wim`, and the installed OS may BSOD on first boot on VMD-affected machines. Rufus creates WIM-format USBs that allow full driver injection. See [Prep the install USB](#2-prep-the-install-usb) for step-by-step instructions.
+
 The bundled VMD driver covers:
 
 | Platform | VMD required |
@@ -87,7 +89,7 @@ The script enumerates the index count in `install.wim` automatically and loops t
 
 For each WIM file: if injection fails, DISM discards the mount and `-PrepUSB` reports **Failed** — no silent fallback.
 
-> **MCT ESD-USB:** If the USB was created with the Microsoft Media Creation Tool, `install.wim` may be packaged as `install.esd` instead. DISM cannot modify ESD files. The script will detect this and instruct the engineer to recreate the USB using [Rufus](https://rufus.ie) with the ISO in WIM mode.
+> **MCT ESD-USB:** If the USB was created with the Microsoft Media Creation Tool, `install.wim` is packaged as `install.esd` — DISM cannot modify it. The script detects this, patches `boot.wim` only (so disk detection works at setup), and prints a warning. The installed OS may BSOD on first boot on VMD-affected machines. Recreate the USB with [Rufus](https://rufus.ie) for full support.
 
 ---
 
@@ -123,7 +125,22 @@ Insert a data USB into the target device and run `-CollectHash`. The script save
 
 ### 2. Prep the install USB
 
-Write the Windows 11 ISO to a USB using the [Microsoft Media Creation Tool](https://www.microsoft.com/software-download/windows11) or [Rufus](https://rufus.ie), insert it into any PC, then run `-PrepUSB`. The script handles everything — Pro edition, VMD driver — automatically.
+> **The USB must be created with Rufus.** Microsoft Media Creation Tool creates USBs in ESD format — the script cannot inject the VMD driver into `install.wim` on an ESD USB. Boot disk detection will still be fixed, but the installed OS may BSOD on first boot on VMD-affected machines.
+
+**Create the USB with [Rufus](https://rufus.ie):**
+
+1. Download the Windows 11 ISO from [microsoft.com/software-download/windows11](https://www.microsoft.com/software-download/windows11)
+2. Insert a USB drive (8 GB minimum)
+3. Open Rufus and select the USB drive
+4. Click **SELECT** and choose the Windows 11 ISO
+5. When Rufus asks **"Windows User Experience"** — leave all options unchecked and click **OK**
+6. Leave all other settings as default and click **START**
+7. Rufus will warn the USB will be erased — confirm
+8. Wait for Rufus to complete — this creates `install.wim` format which the script can modify
+
+Once complete, insert the USB into any PC and run `-PrepUSB`. The script handles everything else automatically — Pro edition enforcement and VMD driver injection into both `boot.wim` and `install.wim`.
+
+> **Microsoft Media Creation Tool** can also be used but only `boot.wim` will be patched — the installed OS may BSOD on first boot on VMD-affected machines.
 
 ### 3. Clean install and OOBE
 
