@@ -203,46 +203,52 @@ function Invoke-WimDriverSet {
         [string]$Root,
         [string]$DriverDir,
         [string]$Tag,
-        [string]$Label
+        [string]$Label,
+        [bool]$BootWimOnly = $false,
+        [bool]$InstallWimOnly = $false
     )
 
     Write-Log "--- Invoke-WimDriverSet started ($Label) ---" -ForegroundColor DarkGray
 
     # ── boot.wim injection (index 2) ──────────────────────────────────────────
-    $bootWim  = "${Root}sources\boot.wim"
-    $mountDir = Join-Path $env:TEMP "WimMount_$(Get-Random)"
-    New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
-    $bootOk = $false
+    if (-not $InstallWimOnly) {
+        $bootWim  = "${Root}sources\boot.wim"
+        $mountDir = Join-Path $env:TEMP "WimMount_$(Get-Random)"
+        New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
+        $bootOk = $false
 
-    Write-Log "$Tag Injecting $Label driver into boot.wim (index 2) using dism.exe..." -ForegroundColor Cyan
+        Write-Log "$Tag Injecting $Label driver into boot.wim (index 2) using dism.exe..." -ForegroundColor Cyan
 
-    try {
-        & "$env:SystemRoot\System32\attrib.exe" -R "$bootWim" 2>&1 | Out-Null
-        Write-Log "$Tag Read-only attribute cleared on boot.wim." -ForegroundColor DarkGray
+        try {
+            & "$env:SystemRoot\System32\attrib.exe" -R "$bootWim" 2>&1 | Out-Null
+            Write-Log "$Tag Read-only attribute cleared on boot.wim." -ForegroundColor DarkGray
 
-        $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$bootWim" /Index:2 /MountDir:"$mountDir" 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
+            $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$bootWim" /Index:2 /MountDir:"$mountDir" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
 
-        $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$mountDir" /Add-Driver /Driver:"$DriverDir" /Recurse 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
+            $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$mountDir" /Add-Driver /Driver:"$DriverDir" /Recurse 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
 
-        $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Commit 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
+            $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Commit 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
 
-        $bootOk = $true
+            $bootOk = $true
 
-    } catch {
-        Write-Log "$Tag ERROR: DISM injection into boot.wim failed for $Label — $_" -ForegroundColor Red
-    } finally {
-        if (-not $bootOk) {
-            & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
+        } catch {
+            Write-Log "$Tag ERROR: DISM injection into boot.wim failed for $Label — $_" -ForegroundColor Red
+        } finally {
+            if (-not $bootOk) {
+                & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
+            }
+            Remove-Item -Path $mountDir -Recurse -Force -ErrorAction SilentlyContinue
         }
-        Remove-Item -Path $mountDir -Recurse -Force -ErrorAction SilentlyContinue
+
+        if (-not $bootOk) { return $false }
+
+        Write-Log "$Tag $Label driver injected into boot.wim." -ForegroundColor Green
     }
 
-    if (-not $bootOk) { return $false }
-
-    Write-Log "$Tag $Label driver injected into boot.wim." -ForegroundColor Green
+    if ($BootWimOnly) { return $true }
 
     # ── install.wim injection (all indexes) ───────────────────────────────────
     $installWim = "${Root}sources\install.wim"
@@ -329,9 +335,16 @@ function Invoke-DriverInjection {
     $repoBase = 'https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main'
 
     $driverSets = if ($Mode -eq 'vmd-only') {
-        @('VMD')
+        @(
+            @{ Name = 'VMD'; InstallWimOnly = $false }
+        )
     } else {
-        @('VMD', 'WiFi', 'Chipset', 'Touchpad')
+        @(
+            @{ Name = 'VMD';      InstallWimOnly = $false },
+            @{ Name = 'WiFi';     InstallWimOnly = $false },
+            @{ Name = 'Chipset';  InstallWimOnly = $true  },
+            @{ Name = 'Touchpad'; InstallWimOnly = $true  }
+        )
     }
 
     Write-Log "$Tag Fetching driver file list from repo..." -ForegroundColor Cyan
@@ -344,26 +357,29 @@ function Invoke-DriverInjection {
     }
 
     foreach ($set in $driverSets) {
-        $stagingDir = Join-Path $env:TEMP "DriverStaging_${set}_$(Get-Random)"
+        $setName        = $set.Name
+        $installWimOnly = $set.InstallWimOnly
+
+        $stagingDir = Join-Path $env:TEMP "DriverStaging_${setName}_$(Get-Random)"
         if (Test-Path $stagingDir) {
             Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
         }
         New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 
-        $setFiles = $tree.tree | Where-Object { $_.type -eq 'blob' -and $_.path -like "drivers/$set/*" }
+        $setFiles = $tree.tree | Where-Object { $_.type -eq 'blob' -and $_.path -like "drivers/$setName/*" }
 
         if (-not $setFiles) {
-            Write-Log "$Tag ERROR: No $set driver files found in repo at drivers/$set/." -ForegroundColor Red
+            Write-Log "$Tag ERROR: No $setName driver files found in repo at drivers/$setName/." -ForegroundColor Red
             Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
             return $false
         }
 
-        Write-Log "$Tag Downloading $set driver files from repo..." -ForegroundColor Cyan
+        Write-Log "$Tag Downloading $setName driver files from repo..." -ForegroundColor Cyan
 
         $downloadOk = $true
         try {
             foreach ($file in $setFiles) {
-                $relPath = $file.path -replace "^drivers/$set/", ''
+                $relPath = $file.path -replace "^drivers/$setName/", ''
                 $dest    = Join-Path $stagingDir ($relPath -replace '/', '\')
                 $destDir = Split-Path $dest -Parent
                 if (-not (Test-Path $destDir)) {
@@ -372,9 +388,9 @@ function Invoke-DriverInjection {
                 Invoke-WebRequest -Uri "$repoBase/$($file.path)" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
                 Write-Log "$Tag   $relPath" -ForegroundColor DarkGray
             }
-            Write-Log "$Tag $set driver files ready." -ForegroundColor Cyan
+            Write-Log "$Tag $setName driver files ready." -ForegroundColor Cyan
         } catch {
-            Write-Log "$Tag ERROR: Could not download $set driver files — $_" -ForegroundColor Red
+            Write-Log "$Tag ERROR: Could not download $setName driver files — $_" -ForegroundColor Red
             $downloadOk = $false
         }
 
@@ -383,7 +399,7 @@ function Invoke-DriverInjection {
             return $false
         }
 
-        $result = Invoke-WimDriverSet -Root $Root -DriverDir $stagingDir -Tag $Tag -Label $set
+        $result = [bool](Invoke-WimDriverSet -Root $Root -DriverDir $stagingDir -Tag $Tag -Label $setName -InstallWimOnly $installWimOnly)
         Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 
         if (-not $result) { return $false }
@@ -441,7 +457,7 @@ function Invoke-PrepUSB {
     # ── Driver detection and injection ─────────────────────────────────────────
     $driverMode = Get-DriversRequired -Force $ForceDrivers.IsPresent -Tag '[PrepUSB]'
     if ($driverMode) {
-        $driverOk = Invoke-DriverInjection -Root $root -Tag '[PrepUSB]' -Mode $driverMode
+        $driverOk = [bool](Invoke-DriverInjection -Root $root -Tag '[PrepUSB]' -Mode $driverMode)
         if (-not $driverOk) { return $false }
     }
 
@@ -892,7 +908,7 @@ function Invoke-PatchISO {
     # ── Driver detection and injection ────────────────────────────────────────
     $driverMode = Get-DriversRequired -Force $ForceDrivers.IsPresent -Tag '[PatchISO]'
     if ($driverMode) {
-        $driverOk = Invoke-DriverInjection -Root $stagingRoot -Tag '[PatchISO]' -Mode $driverMode
+        $driverOk = [bool](Invoke-DriverInjection -Root $stagingRoot -Tag '[PatchISO]' -Mode $driverMode)
         if (-not $driverOk) {
             Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
             return $false

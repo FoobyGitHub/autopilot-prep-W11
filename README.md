@@ -32,7 +32,7 @@ The script detects the CPU and injects the appropriate driver sets automatically
 
 **Chipset and Touchpad** — Arrow Lake platform drivers (Intel chipset INF and Asus touchpad stack) required for full hardware functionality on first boot.
 
-All driver sets are injected into both `boot.wim` (so setup can see the hardware) and all indexes in `install.wim` (so the installed OS boots and operates correctly).
+VMD and Wi-Fi/BT are injected into both `boot.wim` (so setup can see the hardware during install) and all indexes in `install.wim` (so the installed OS boots and operates correctly). Chipset and Touchpad are injected into `install.wim` only — they are platform software drivers, not required in the PE environment.
 
 ---
 
@@ -112,7 +112,7 @@ Create the USB with Rufus first (see below), then run `-PrepUSB` on the target m
 
 1. Injects `ei.cfg` → forces Pro edition at setup, no edition selection screen
 2. Detects the CPU → determines which driver sets are needed
-3. Downloads the required drivers from this repo and injects them into `boot.wim` (so setup can see the hardware) and all indexes in `install.wim` (so the installed OS boots and operates correctly)
+3. Downloads the required drivers from this repo and injects them into `boot.wim` and/or `install.wim` depending on driver type (see driver injection table above)
 
 ### Building an image on a separate machine
 
