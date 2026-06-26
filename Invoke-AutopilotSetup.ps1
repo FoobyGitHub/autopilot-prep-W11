@@ -340,9 +340,8 @@ function Invoke-DriverInjection {
         )
     } else {
         @(
-            @{ Name = 'VMD';      InstallWimOnly = $false },
-            @{ Name = 'WiFi';     InstallWimOnly = $false },
-            @{ Name = 'Touchpad'; InstallWimOnly = $true  }
+            @{ Name = 'VMD';  InstallWimOnly = $false },
+            @{ Name = 'WiFi'; InstallWimOnly = $false }
         )
     }
 
