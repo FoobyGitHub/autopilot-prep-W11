@@ -6,10 +6,47 @@ Windows 11 Pro deployment toolkit for Microsoft 365 Business Premium environment
 
 ## Pick your scenario
 
-- **"I have a device with Windows on it and need to register it with Intune and prep a build USB"** → [Path B — one-liner](#path-b--one-liner-existing-os-or-prep-machine) (`-CollectHash`, `-PrepUSB`)
-- **"I need to pre-stage a golden ISO on a prep machine for repeated deployments"** → [Path B — PatchISO](#building-an-image-on-a-separate-machine) (`-PatchISO`)
-- **"I have a bare-metal device with no OS and no spare laptop"** → [Path A — WinPE USB](#path-a--winpe-usb-bare-metal-registration-and-deployment)
-- **"I just need the hardware hash uploaded to Intune"** → `-CollectHash` [one-liner](#collect-hardware-hash) if the device has Windows, or [Path A](#path-a--winpe-usb-bare-metal-registration-and-deployment) hash-only mode if it has no OS
+**I have a device with Windows on it and need to register it with Intune.**
+Plug in a spare USB first — the hash saves to it automatically.
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash
+```
+
+**I need to prep a Windows 11 USB on the device I am rebuilding.**
+Create the USB with Rufus first (see [Rufus instructions](#creating-the-usb-with-rufus) below), then run this on the target machine. Detection reads the local CPU and injects only what that hardware needs.
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
+```
+
+**I need to prep a USB and collect the hash in one shot.**
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -CollectHash
+```
+
+**I need to pre-stage a golden ISO on a prep machine for repeated deployments.**
+Patch once, burn the output `_patched.iso` with Rufus as many times as needed. Use `-ForceDrivers` because the prep machine is not the target hardware.
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO -ForceDrivers
+```
+
+**I need to prep a USB on a different machine to the target.**
+Use `-ForceDrivers` to bypass local CPU detection and inject all driver sets.
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceDrivers
+```
+
+**I have a bare-metal device with no OS and no spare laptop.**
+Boot from a Path A WinPE USB — see [Path A setup](#path-a--winpe-usb-bare-metal-registration-and-deployment) below. The USB collects the hash, uploads it to Intune, and optionally deploys Windows via OSDCloud. Requires one-time app registration setup.
+
+**I just need the hardware hash from a bare-metal device (no OS).**
+Boot from a Path A WinPE USB and choose **[1] Finish** at the menu — see [Path A setup](#path-a--winpe-usb-bare-metal-registration-and-deployment) below. The hash is uploaded automatically; install Windows separately.
+
+All Path B commands above run from an elevated PowerShell prompt — right-click → Run as administrator. Running with no flags prints a help screen with all options.
 
 ---
 
@@ -83,57 +120,17 @@ OSDCloud handles driver injection at deploy time. Dell, HP, Lenovo, and Surface 
 
 ---
 
-## Path B — one-liner (existing OS or prep machine)
-
-Single PowerShell script, runs from an elevated prompt — nothing to install. Copy the command you need.
+## Path B — flags and detail
 
 **`-PrepUSB`** — takes a Windows 11 USB created with Rufus and prepares it for deployment: forces Pro edition via `ei.cfg`, detects the CPU, and injects the appropriate Intel drivers into `boot.wim` and `install.wim`. Run once per USB on any machine with internet access.
 
-**`-PatchISO`** — does the same to a Windows 11 ISO file and outputs a patched `.iso` file ready to burn with Rufus. Patch once, burn as many times as needed. This is the recommended approach for repeated deployments — pre-stage a single golden ISO on a fast prep machine, then burn **the output file** to as many USBs as needed with no further steps.
+**`-PatchISO`** — does the same to a Windows 11 ISO file and outputs a patched `.iso` file in the folder you select. Patch once, burn as many times as needed. This is the recommended approach for repeated deployments — pre-stage a single golden ISO on a fast prep machine, then burn **the output file** to as many USBs as needed with no further steps.
 
 **`-CollectHash`** — collects the device hardware hash and uploads it to Intune via Microsoft Graph. Run on the target device before or after the OS install.
 
-**`-ForceDrivers`** — use this when running `-PrepUSB` or `-PatchISO` on a different machine to the one being built. Driver detection reads the hardware on the machine running the script — if that is not the target, detection will not match and drivers will be skipped. `-ForceDrivers` bypasses detection and injects all driver sets (VMD, Wi-Fi/BT) regardless. For cross-machine prep this should be the default:
+**`-ForceDrivers`** — use this when running `-PrepUSB` or `-PatchISO` on a different machine to the one being built. Driver detection reads the hardware on the machine running the script — if that is not the target, detection will not match and drivers will be skipped. `-ForceDrivers` bypasses detection and injects all driver sets (VMD, Wi-Fi/BT) regardless.
 
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO -ForceDrivers
-```
-
-### Quick start
-
-Open PowerShell as Administrator (right-click → Run as administrator) and copy the command you need.
-
-**Collect hardware hash** — plug in a spare USB first, the script saves to it automatically:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -CollectHash
-```
-
-**Prep a Windows 11 USB:**
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB
-```
-
-**Prep USB on a specific drive letter:**
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -DriveLetter E
-```
-
-**Both at once:**
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -CollectHash
-```
-
-**Pre-stage a patched ISO** — file and folder pickers open automatically. Burn the output `_patched.iso` with Rufus, not the original source ISO:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO
-```
-
-**No flags** — prints a help screen with all options and the above commands ready to copy.
+**`-DriveLetter`** — force a specific drive letter for `-PrepUSB` (e.g. `-DriveLetter E`).
 
 ### Driver injection — what gets injected and when
 
@@ -151,19 +148,13 @@ The script detects the CPU and injects the appropriate driver sets automatically
 
 Both driver sets are injected into `boot.wim` (so setup can see the hardware during install) and all indexes in `install.wim` (so the installed OS boots and operates correctly).
 
-### Deploying directly on the target machine
-
-Run the script on the machine you are rebuilding. Detection reads the local CPU and injects only what that hardware needs — no flags required.
-
-Create the USB with Rufus first (see below), then run `-PrepUSB` on the target machine. The script finds the USB automatically, injects `ei.cfg` and the appropriate drivers, then the machine is ready to reboot from it.
+### Creating the USB with Rufus
 
 > **Use Rufus, not the Microsoft Media Creation Tool.** MCT creates USBs in ESD format — drivers cannot be injected into `install.wim` on an ESD USB. Boot disk detection will still be fixed, but the installed OS may BSOD on first boot on VMD-affected machines. Rufus creates WIM-format USBs which work properly.
 
-**Creating the USB with [Rufus](https://rufus.ie):**
-
 1. Download the Windows 11 ISO from [microsoft.com/software-download/windows11](https://www.microsoft.com/software-download/windows11)
 2. Plug in a USB drive (8 GB minimum)
-3. Open Rufus and select the USB drive
+3. Open [Rufus](https://rufus.ie) and select the USB drive
 4. Click **SELECT** and pick the Windows 11 ISO
 5. When asked about **"Windows User Experience"** — leave everything unchecked and click **OK**
 6. Leave all other settings as they are and click **START**
@@ -173,19 +164,7 @@ Create the USB with Rufus first (see below), then run `-PrepUSB` on the target m
 
 Use `-ForceDrivers` when prepping on a different machine to the target — detection reads the local CPU and will not see the target's hardware.
 
-**Pre-staged USB:**
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PrepUSB -ForceDrivers
-```
-
-**Pre-staged ISO** — patch once, burn to as many USBs as needed. The script outputs a new `_patched.iso` file in the folder you select. **Burn that file with Rufus — not the original source ISO.**
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/FoobyGitHub/autopilot-prep-W11/main/Invoke-AutopilotSetup.ps1))) -PatchISO -ForceDrivers
-```
-
-A file picker opens for the source ISO, then a folder picker for the output location. The patched ISO can be hosted centrally (file share, Azure Blob, etc.) so the team is always burning from the same known-good image.
+For `-PatchISO`, a file picker opens for the source ISO, then a folder picker for the output location. The patched ISO can be hosted centrally (file share, Azure Blob, etc.) so the team is always burning from the same known-good image.
 
 **Requirements for `-PatchISO`:** Windows ADK Deployment Tools — installed automatically if not present (~200MB download). A 10-second warning is shown before anything is downloaded.
 
@@ -231,28 +210,6 @@ Requires an Entra ID App Registration with `DeviceManagementServiceConfig.ReadWr
 2. Devices → Enroll devices → Windows enrollment → Devices
 3. Import → upload the CSV
 4. Allow 5–15 minutes for the device to appear
-
----
-
-## Full deployment steps
-
-### Path A (bare metal — WinPE USB)
-
-1. Run `New-AutopilotAppRegistration.ps1` on any admin workstation (one-time setup).
-2. Run `Build-WinPEUSB.ps1` to build the bootable USB.
-3. Boot the target device from the USB. The hash is collected and uploaded automatically.
-4. Choose **[1] Finish** to power off (install Windows later via a Rufus USB or PatchISO), or **[2] Deploy Windows** to install via OSDCloud immediately.
-5. At OOBE, connect to the internet. If the device hash is registered in Intune, Autopilot takes over automatically.
-6. The user signs in with their work account and Intune enrols the device.
-
-### Path B (existing OS — one-liner)
-
-1. On the device being enrolled — run `-CollectHash` (plug in a USB first). The hash is saved to the USB or uploaded to Intune automatically.
-2. Prep the install media — run `-PrepUSB` to prepare a Rufus USB directly, or run `-PatchISO` to produce a patched ISO then burn the output `_patched.iso` with Rufus.
-3. Boot the target device from the USB. Delete existing partitions if doing a clean install.
-4. Windows 11 Pro installs — no edition prompt, no driver prompts.
-5. At OOBE, connect to the internet. If the device hash is registered in Intune, Autopilot takes over automatically.
-6. The user signs in with their work account and Intune enrols the device.
 
 ---
 
