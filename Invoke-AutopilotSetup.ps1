@@ -899,6 +899,45 @@ function Invoke-PatchISO {
     Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue
     Write-Log "[PatchISO] ISO dismounted." -ForegroundColor DarkGray
 
+    # ── Export Pro edition only (reduces DISM injection cycles) ───────────────
+    $installWim = "${stagingRoot}sources\install.wim"
+    Write-Log "[PatchISO] Detecting Windows 11 Pro edition index in install.wim..." -ForegroundColor Cyan
+    try {
+        $wimInfo    = & "$env:SystemRoot\System32\dism.exe" /Get-WimInfo /WimFile:"$installWim" 2>&1
+        $proIndex   = $null
+        $currentIdx = $null
+        foreach ($line in $wimInfo) {
+            if ($line -match '^\s*Index\s*:\s*(\d+)') {
+                $currentIdx = $matches[1]
+            }
+            if ($line -match '^\s*Name\s*:\s*Windows 11 Pro\s*$' -and $currentIdx) {
+                $proIndex = [int]$currentIdx
+                break
+            }
+        }
+
+        if ($proIndex) {
+            $installWimTmp = "${stagingRoot}sources\install_pro.wim"
+            Write-Log "[PatchISO] Exporting Windows 11 Pro (index $proIndex) — this may take a few minutes..." -ForegroundColor Cyan
+
+            $out = & "$env:SystemRoot\System32\dism.exe" /Export-Image /SourceImageFile:"$installWim" /SourceIndex:$proIndex /DestinationImageFile:"$installWimTmp" /Compress:max 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "DISM Export-Image failed (exit $LASTEXITCODE): $($out -join ' ')"
+            }
+
+            Remove-Item -Path $installWim -Force -ErrorAction Stop
+            Rename-Item -Path $installWimTmp -NewName 'install.wim' -ErrorAction Stop
+
+            Write-Log "[PatchISO] Exported Windows 11 Pro (index $proIndex) — install.wim now single-edition." -ForegroundColor Green
+        } else {
+            Write-Log "[PatchISO] WARNING: Could not identify Windows 11 Pro index — skipping export, injecting all editions." -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Log "[PatchISO] ERROR: install.wim Pro export failed — $_" -ForegroundColor Red
+        Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
     # ── Inject ei.cfg ─────────────────────────────────────────────────────────
     $eiCfgPath = "${stagingRoot}sources\ei.cfg"
     $eiCfg     = "[EditionID]`r`nProfessional`r`n[Channel]`r`n_Default`r`n[VL]`r`n0`r`n"
