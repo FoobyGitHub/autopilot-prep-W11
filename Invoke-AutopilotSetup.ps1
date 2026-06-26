@@ -196,130 +196,6 @@ function Get-DriversRequired {
     return $false
 }
 
-# ── Shared DISM injection helper ───────────────────────────────────────────────
-
-function Invoke-WimDriverSet {
-    param(
-        [string]$Root,
-        [string]$DriverDir,
-        [string]$Tag,
-        [string]$Label,
-        [bool]$BootWimOnly = $false,
-        [bool]$InstallWimOnly = $false
-    )
-
-    Write-Log "--- Invoke-WimDriverSet started ($Label) ---" -ForegroundColor DarkGray
-
-    # ── boot.wim injection (index 2) ──────────────────────────────────────────
-    if (-not $InstallWimOnly) {
-        $bootWim  = "${Root}sources\boot.wim"
-        $mountDir = Join-Path $env:TEMP "WimMount_$(Get-Random)"
-        New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
-        $bootOk = $false
-
-        Write-Log "$Tag Injecting $Label driver into boot.wim (index 2) using dism.exe..." -ForegroundColor Cyan
-
-        try {
-            & "$env:SystemRoot\System32\attrib.exe" -R "$bootWim" 2>&1 | Out-Null
-            Write-Log "$Tag Read-only attribute cleared on boot.wim." -ForegroundColor DarkGray
-
-            $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$bootWim" /Index:2 /MountDir:"$mountDir" 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$mountDir" /Add-Driver /Driver:"$DriverDir" /Recurse 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Commit 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $bootOk = $true
-
-        } catch {
-            Write-Log "$Tag ERROR: DISM injection into boot.wim failed for $Label — $_" -ForegroundColor Red
-        } finally {
-            if (-not $bootOk) {
-                & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
-            }
-            Remove-Item -Path $mountDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-
-        if (-not $bootOk) { return $false }
-
-        Write-Log "$Tag $Label driver injected into boot.wim." -ForegroundColor Green
-    }
-
-    if ($BootWimOnly) { return $true }
-
-    # ── install.wim injection (all indexes) ───────────────────────────────────
-    $installWim = "${Root}sources\install.wim"
-    $installEsd = "${Root}sources\install.esd"
-
-    if (-not (Test-Path $installWim)) {
-        if (Test-Path $installEsd) {
-            Write-Log "$Tag WARNING: install.esd detected (MCT-created USB) — install.wim injection skipped. Boot disk detection is fixed but OS may BSOD on first boot. Recreate the USB using Rufus (see README) for full driver support." -ForegroundColor Yellow
-        } else {
-            Write-Log "$Tag WARNING: install.wim not found — skipping install.wim injection." -ForegroundColor Yellow
-        }
-        return $true
-    }
-
-    Write-Log "$Tag Enumerating install.wim indexes for $Label..." -ForegroundColor Cyan
-    $wimInfoOut = & "$env:SystemRoot\System32\dism.exe" /Get-WimInfo /WimFile:"$installWim" 2>&1
-    $indexCount = ($wimInfoOut | Select-String -Pattern '^\s*Index\s*:\s*\d+').Count
-
-    if ($indexCount -eq 0) {
-        Write-Log "$Tag ERROR: Could not determine index count from install.wim." -ForegroundColor Red
-        return $false
-    }
-
-    Write-Log "$Tag Found $indexCount index(es) in install.wim — injecting $Label driver into each..." -ForegroundColor Cyan
-
-    & "$env:SystemRoot\System32\attrib.exe" -R "$installWim" 2>&1 | Out-Null
-    Write-Log "$Tag Read-only attribute cleared on install.wim." -ForegroundColor DarkGray
-
-    $installOk = $true
-
-    for ($idx = 1; $idx -le $indexCount; $idx++) {
-        $installMountDir = Join-Path $env:TEMP "InstallWimMount_$(Get-Random)"
-        New-Item -ItemType Directory -Path $installMountDir -Force | Out-Null
-        $idxOk = $false
-
-        Write-Log "$Tag Processing install.wim index $idx of $indexCount..." -ForegroundColor Cyan
-
-        try {
-            $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$installWim" /Index:$idx /MountDir:"$installMountDir" 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$installMountDir" /Add-Driver /Driver:"$DriverDir" /Recurse 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Commit 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
-
-            $idxOk = $true
-
-        } catch {
-            Write-Log "$Tag ERROR: DISM injection into install.wim index $idx failed for $Label — $_" -ForegroundColor Red
-            $installOk = $false
-        } finally {
-            if (-not $idxOk) {
-                & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Discard 2>&1 | Out-Null
-            }
-            Remove-Item -Path $installMountDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-
-        if (-not $idxOk) { break }
-    }
-
-    if (-not $installOk) {
-        Write-Log "$Tag ERROR: $Label injection into install.wim failed — see above." -ForegroundColor Red
-        return $false
-    }
-
-    Write-Log "$Tag $Label driver injected into install.wim ($indexCount indexes)." -ForegroundColor Green
-    return $true
-}
-
 # ── Driver download and injection ──────────────────────────────────────────────
 
 function Invoke-DriverInjection {
@@ -354,12 +230,11 @@ function Invoke-DriverInjection {
         return $false
     }
 
-    $injectionOk = $true
+    # ── Download all driver sets to staging directories ────────────────────────
+    $stagingDirs = @{}
 
     foreach ($set in $driverSets) {
-        $setName        = $set.Name
-        $installWimOnly = $set.InstallWimOnly
-
+        $setName    = $set.Name
         $stagingDir = Join-Path $env:TEMP "DriverStaging_${setName}_$(Get-Random)"
         if (Test-Path $stagingDir) {
             Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -376,35 +251,174 @@ function Invoke-DriverInjection {
 
             Write-Log "$Tag Downloading $setName driver files from repo..." -ForegroundColor Cyan
 
-            try {
-                foreach ($file in $setFiles) {
-                    $relPath = $file.path -replace "^drivers/$setName/", ''
-                    $dest    = Join-Path $stagingDir ($relPath -replace '/', '\')
-                    $destDir = Split-Path $dest -Parent
-                    if (-not (Test-Path $destDir)) {
-                        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-                    }
-                    Invoke-WebRequest -Uri "$repoBase/$($file.path)" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-                    Write-Log "$Tag   $relPath" -ForegroundColor DarkGray
+            foreach ($file in $setFiles) {
+                $relPath = $file.path -replace "^drivers/$setName/", ''
+                $dest    = Join-Path $stagingDir ($relPath -replace '/', '\')
+                $destDir = Split-Path $dest -Parent
+                if (-not (Test-Path $destDir)) {
+                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
                 }
-                Write-Log "$Tag $setName driver files ready." -ForegroundColor Cyan
-            } catch {
-                Write-Log "$Tag ERROR: Could not download $setName driver files — $_" -ForegroundColor Red
-                throw
+                Invoke-WebRequest -Uri "$repoBase/$($file.path)" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                Write-Log "$Tag   $relPath" -ForegroundColor DarkGray
+            }
+            Write-Log "$Tag $setName driver files ready." -ForegroundColor Cyan
+            $stagingDirs[$setName] = $stagingDir
+        } catch {
+            Write-Log "$Tag ERROR: $setName driver set failed — $_" -ForegroundColor Red
+            Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($stagingDirs.Count -eq 0) {
+        Write-Log "$Tag ERROR: No driver sets were downloaded successfully." -ForegroundColor Red
+        return $false
+    }
+
+    # ── Determine which sets target which WIM files ───────────────────────────
+    $bootSets    = @()
+    $installSets = @()
+    foreach ($set in $driverSets) {
+        if (-not $stagingDirs.ContainsKey($set.Name)) { continue }
+        if (-not $set.InstallWimOnly) { $bootSets    += $set }
+        if (-not $set.BootWimOnly)    { $installSets += $set }
+    }
+
+    $injectionOk = $true
+
+    # ── boot.wim injection (index 2) — single mount ──────────────────────────
+    if ($bootSets.Count -gt 0) {
+        $bootWim     = "${Root}sources\boot.wim"
+        $mountDir    = Join-Path $env:TEMP "WimMount_$(Get-Random)"
+        New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
+        $bootMountOk = $false
+        $bootAnyOk   = $false
+
+        Write-Log "$Tag Mounting boot.wim (index 2) for driver injection..." -ForegroundColor Cyan
+
+        try {
+            & "$env:SystemRoot\System32\attrib.exe" -R "$bootWim" 2>&1 | Out-Null
+            Write-Log "$Tag Read-only attribute cleared on boot.wim." -ForegroundColor DarkGray
+
+            $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$bootWim" /Index:2 /MountDir:"$mountDir" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
+            $bootMountOk = $true
+
+            foreach ($set in $bootSets) {
+                $setName = $set.Name
+                Write-Log "$Tag Injecting $setName driver into boot.wim..." -ForegroundColor Cyan
+                try {
+                    $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$mountDir" /Add-Driver /Driver:"$($stagingDirs[$setName])" /Recurse 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
+                    Write-Log "$Tag $setName driver injected into boot.wim." -ForegroundColor Green
+                    $bootAnyOk = $true
+                } catch {
+                    Write-Log "$Tag ERROR: DISM injection into boot.wim failed for $setName — $_" -ForegroundColor Red
+                    $injectionOk = $false
+                }
             }
 
-            $result = [bool](Invoke-WimDriverSet -Root $Root -DriverDir $stagingDir -Tag $Tag -Label $setName -InstallWimOnly $installWimOnly)
-
-            if (-not $result) {
-                throw "Injection failed for $setName"
+            if ($bootAnyOk) {
+                $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Commit 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
+            } else {
+                & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
             }
 
         } catch {
-            Write-Log "$Tag ERROR: $setName driver set failed — $_" -ForegroundColor Red
+            Write-Log "$Tag ERROR: boot.wim mount/unmount failed — $_" -ForegroundColor Red
+            if ($bootMountOk) {
+                & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$mountDir" /Discard 2>&1 | Out-Null
+            }
             $injectionOk = $false
         } finally {
-            Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $mountDir -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    # ── install.wim injection (all indexes) — single mount per index ─────────
+    if ($installSets.Count -gt 0) {
+        $installWim = "${Root}sources\install.wim"
+        $installEsd = "${Root}sources\install.esd"
+
+        if (-not (Test-Path $installWim)) {
+            if (Test-Path $installEsd) {
+                Write-Log "$Tag WARNING: install.esd detected (MCT-created USB) — install.wim injection skipped. Boot disk detection is fixed but OS may BSOD on first boot. Recreate the USB using Rufus (see README) for full driver support." -ForegroundColor Yellow
+            } else {
+                Write-Log "$Tag WARNING: install.wim not found — skipping install.wim injection." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Log "$Tag Enumerating install.wim indexes..." -ForegroundColor Cyan
+            $wimInfoOut = & "$env:SystemRoot\System32\dism.exe" /Get-WimInfo /WimFile:"$installWim" 2>&1
+            $indexCount = ($wimInfoOut | Select-String -Pattern '^\s*Index\s*:\s*\d+').Count
+
+            if ($indexCount -eq 0) {
+                Write-Log "$Tag ERROR: Could not determine index count from install.wim." -ForegroundColor Red
+                $injectionOk = $false
+            } else {
+                $setNames = ($installSets | ForEach-Object { $_.Name }) -join ', '
+                Write-Log "$Tag Found $indexCount index(es) in install.wim — injecting $setNames into each..." -ForegroundColor Cyan
+
+                & "$env:SystemRoot\System32\attrib.exe" -R "$installWim" 2>&1 | Out-Null
+                Write-Log "$Tag Read-only attribute cleared on install.wim." -ForegroundColor DarkGray
+
+                for ($idx = 1; $idx -le $indexCount; $idx++) {
+                    $installMountDir = Join-Path $env:TEMP "InstallWimMount_$(Get-Random)"
+                    New-Item -ItemType Directory -Path $installMountDir -Force | Out-Null
+                    $idxMountOk = $false
+                    $idxAnyOk   = $false
+
+                    Write-Log "$Tag Processing install.wim index $idx of $indexCount..." -ForegroundColor Cyan
+
+                    try {
+                        $out = & "$env:SystemRoot\System32\dism.exe" /Mount-Wim /WimFile:"$installWim" /Index:$idx /MountDir:"$installMountDir" 2>&1
+                        if ($LASTEXITCODE -ne 0) { throw "Mount failed (exit $LASTEXITCODE): $($out -join ' ')" }
+                        $idxMountOk = $true
+
+                        foreach ($set in $installSets) {
+                            $setName = $set.Name
+                            Write-Log "$Tag Injecting $setName driver into install.wim index $idx..." -ForegroundColor Cyan
+                            try {
+                                $out = & "$env:SystemRoot\System32\dism.exe" /Image:"$installMountDir" /Add-Driver /Driver:"$($stagingDirs[$setName])" /Recurse 2>&1
+                                if ($LASTEXITCODE -ne 0) { throw "Add-Driver failed (exit $LASTEXITCODE): $($out -join ' ')" }
+                                Write-Log "$Tag $setName driver injected into install.wim index $idx." -ForegroundColor Green
+                                $idxAnyOk = $true
+                            } catch {
+                                Write-Log "$Tag ERROR: DISM injection into install.wim index $idx failed for $setName — $_" -ForegroundColor Red
+                                $injectionOk = $false
+                            }
+                        }
+
+                        if ($idxAnyOk) {
+                            $out = & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Commit 2>&1
+                            if ($LASTEXITCODE -ne 0) { throw "Unmount/commit failed (exit $LASTEXITCODE): $($out -join ' ')" }
+                        } else {
+                            & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Discard 2>&1 | Out-Null
+                        }
+
+                    } catch {
+                        Write-Log "$Tag ERROR: install.wim index $idx mount/unmount failed — $_" -ForegroundColor Red
+                        if ($idxMountOk) {
+                            & "$env:SystemRoot\System32\dism.exe" /Unmount-Wim /MountDir:"$installMountDir" /Discard 2>&1 | Out-Null
+                        }
+                        $injectionOk = $false
+                        break
+                    } finally {
+                        Remove-Item -Path $installMountDir -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+
+                if ($injectionOk) {
+                    Write-Log "$Tag Drivers ($setNames) injected into install.wim ($indexCount indexes)." -ForegroundColor Green
+                } else {
+                    Write-Log "$Tag ERROR: Driver injection into install.wim failed — see above." -ForegroundColor Red
+                }
+            }
+        }
+    }
+
+    # ── Cleanup staging directories ──────────────────────────────────────────────
+    foreach ($dir in $stagingDirs.Values) {
+        Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     return $injectionOk
