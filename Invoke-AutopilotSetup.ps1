@@ -342,7 +342,6 @@ function Invoke-DriverInjection {
         @(
             @{ Name = 'VMD';      InstallWimOnly = $false },
             @{ Name = 'WiFi';     InstallWimOnly = $false },
-            @{ Name = 'Chipset';  InstallWimOnly = $true  },
             @{ Name = 'Touchpad'; InstallWimOnly = $true  }
         )
     }
@@ -356,6 +355,8 @@ function Invoke-DriverInjection {
         return $false
     }
 
+    $injectionOk = $true
+
     foreach ($set in $driverSets) {
         $setName        = $set.Name
         $installWimOnly = $set.InstallWimOnly
@@ -366,46 +367,48 @@ function Invoke-DriverInjection {
         }
         New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 
-        $setFiles = $tree.tree | Where-Object { $_.type -eq 'blob' -and $_.path -like "drivers/$setName/*" }
-
-        if (-not $setFiles) {
-            Write-Log "$Tag ERROR: No $setName driver files found in repo at drivers/$setName/." -ForegroundColor Red
-            Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-            return $false
-        }
-
-        Write-Log "$Tag Downloading $setName driver files from repo..." -ForegroundColor Cyan
-
-        $downloadOk = $true
         try {
-            foreach ($file in $setFiles) {
-                $relPath = $file.path -replace "^drivers/$setName/", ''
-                $dest    = Join-Path $stagingDir ($relPath -replace '/', '\')
-                $destDir = Split-Path $dest -Parent
-                if (-not (Test-Path $destDir)) {
-                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-                }
-                Invoke-WebRequest -Uri "$repoBase/$($file.path)" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-                Write-Log "$Tag   $relPath" -ForegroundColor DarkGray
+            $setFiles = $tree.tree | Where-Object { $_.type -eq 'blob' -and $_.path -like "drivers/$setName/*" }
+
+            if (-not $setFiles) {
+                Write-Log "$Tag ERROR: No $setName driver files found in repo at drivers/$setName/." -ForegroundColor Red
+                throw "No driver files for $setName"
             }
-            Write-Log "$Tag $setName driver files ready." -ForegroundColor Cyan
+
+            Write-Log "$Tag Downloading $setName driver files from repo..." -ForegroundColor Cyan
+
+            try {
+                foreach ($file in $setFiles) {
+                    $relPath = $file.path -replace "^drivers/$setName/", ''
+                    $dest    = Join-Path $stagingDir ($relPath -replace '/', '\')
+                    $destDir = Split-Path $dest -Parent
+                    if (-not (Test-Path $destDir)) {
+                        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                    }
+                    Invoke-WebRequest -Uri "$repoBase/$($file.path)" -OutFile $dest -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                    Write-Log "$Tag   $relPath" -ForegroundColor DarkGray
+                }
+                Write-Log "$Tag $setName driver files ready." -ForegroundColor Cyan
+            } catch {
+                Write-Log "$Tag ERROR: Could not download $setName driver files — $_" -ForegroundColor Red
+                throw
+            }
+
+            $result = [bool](Invoke-WimDriverSet -Root $Root -DriverDir $stagingDir -Tag $Tag -Label $setName -InstallWimOnly $installWimOnly)
+
+            if (-not $result) {
+                throw "Injection failed for $setName"
+            }
+
         } catch {
-            Write-Log "$Tag ERROR: Could not download $setName driver files — $_" -ForegroundColor Red
-            $downloadOk = $false
-        }
-
-        if (-not $downloadOk) {
+            Write-Log "$Tag ERROR: $setName driver set failed — $_" -ForegroundColor Red
+            $injectionOk = $false
+        } finally {
             Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-            return $false
         }
-
-        $result = [bool](Invoke-WimDriverSet -Root $Root -DriverDir $stagingDir -Tag $Tag -Label $setName -InstallWimOnly $installWimOnly)
-        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-
-        if (-not $result) { return $false }
     }
 
-    return $true
+    return $injectionOk
 }
 
 # ── PrepUSB ────────────────────────────────────────────────────────────────────
