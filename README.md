@@ -204,6 +204,16 @@ Requires an Entra ID App Registration with `DeviceManagementServiceConfig.ReadWr
 
 ---
 
+## Logs
+
+Every run writes a timestamped log file to:
+
+`%TEMP%\AutopilotSetup_YYYYMMDD_HHMMSS.log`
+
+On most machines that resolves to `C:\Users\<username>\AppData\Local\Temp\`. The log contains everything printed to the console during the run, with timestamps on each line. If something fails, the log file path is printed at the end of the session — share it when raising a bug.
+
+---
+
 ## Notes
 
 - The script sets execution policy to `RemoteSigned` for the current user automatically — no need to sort this manually beforehand.
