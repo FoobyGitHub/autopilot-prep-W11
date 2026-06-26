@@ -43,6 +43,60 @@ Write-Status "  AutopilotPrep — WinPE Hash Upload" -ForegroundColor Cyan
 Write-Status "  ────────────────────────────────────────" -ForegroundColor DarkGray
 Write-Host ""
 
+function Show-PostUploadMenu {
+    param(
+        [string]$Serial
+    )
+
+    Clear-Host
+    Write-Host ""
+    Write-Host ""
+    Write-Status "  ════════════════════════════════════════" -ForegroundColor Green
+    Write-Status "  SUCCESS — Autopilot Registration Complete" -ForegroundColor Green
+    Write-Status "  ════════════════════════════════════════" -ForegroundColor Green
+    Write-Host ""
+    Write-Status "  Serial: $Serial" -ForegroundColor White
+    Write-Host ""
+    Write-Status "  ────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Status "  [1] Finish — remove USB and power off" -ForegroundColor White
+    Write-Status "  [2] Deploy Windows — launch OSDCloud" -ForegroundColor White
+    Write-Status "  ────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Status "Press 1 or 2 to continue..." -ForegroundColor Cyan
+
+    while ($true) {
+        $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown').Character
+        if ($key -eq '1') {
+            Write-Host ""
+            Write-Status "Remove the USB drive now. Powering off in 5 seconds..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+            & wpeutil.exe shutdown
+            exit 0
+        }
+        if ($key -eq '2') {
+            Write-Host ""
+            Write-Status "Starting OSDCloud..." -ForegroundColor Cyan
+
+            if (Get-Command -Name Start-OSDCloudGUI -ErrorAction SilentlyContinue) {
+                Start-OSDCloudGUI
+                exit 0
+            }
+
+            if (Get-Command -Name Start-OSDCloud -ErrorAction SilentlyContinue) {
+                Write-Status "Start-OSDCloudGUI not available — falling back to Start-OSDCloud." -ForegroundColor Yellow
+                Start-OSDCloud
+                exit 0
+            }
+
+            Write-Status "ERROR: Neither Start-OSDCloudGUI nor Start-OSDCloud is available." -ForegroundColor Red
+            Write-Status "Remove the USB drive now. Powering off in 5 seconds..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+            & wpeutil.exe shutdown
+            exit 1
+        }
+    }
+}
+
 # ── STEP 1 — Detect WinPE ────────────────────────────────────────────────────
 
 Write-Status "[Step 1] Checking for WinPE environment..." -ForegroundColor Cyan
@@ -313,7 +367,7 @@ while ($attempt -lt $maxRetries) {
             Write-Status "  Import ID   : $importId" -ForegroundColor White
             Write-Status "  ────────────────────────────────────────" -ForegroundColor DarkGray
             Write-Host ""
-            exit 0
+            Show-PostUploadMenu -Serial $serial
         }
 
         if ($status -eq 'error') {
